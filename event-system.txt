@@ -1,0 +1,66 @@
+(mouse-down [matcher ; a set of keys specifying a matching subset of props for the matching morphs
+             changes ; function returning a new version of the world, after the event has happened
+             promises ; the different event matchings that the event will reifiy into after execution
+             ])
+
+(defn inspectable [morph-id]
+  (mouse-click-left {:id morph-id}))
+
+(defn followable [morph-id]
+  (mouse-move {} ; matches on all morphs where this is happening
+              (fn [world _ pos]
+                (redefine world morph-id (fn [self props submorphs]
+                                           set posittion to the one of the cursor)))
+              (fn [world _ pos]
+                (followable morph-id))))
+
+(defn draggable [morph-id]
+  (mouse-down 
+   {:id morph-id}
+   (fn [world _ _]
+     world)  ; no changes
+   (fn [world id pos]  ; but a promise
+     (drag morph-id pos))))
+
+(defn drag [morph-id prev-pos]
+  (select-signal ; select gets passed a set of signals, and it evaluates to the first one
+   ; that fires. All others are discarded, so they take no effect.
+   (mouse-move {} 
+               (fn [world _ {pos-x :x pos-y :y}]
+                 ; set the position of the morph
+                 (let [new-world (redefine world morph-id (fn [self props submorphs]
+                                            (let [{dx :x dy :y} (add-points prev-pos {:x (- pos-x) :y (- pos-y)})
+                                                  new-pos (add-points (props :position) {:x (- dx) :y (- dy)})]
+                                              (self (assoc props :position new-pos
+                                                           :cursor-pos {:x pos-x :y pos-y}) submorphs))
+                                                                                                                                           (self (assoc props :position pos))))])
+                 (event-monad (drag morph-id {pos-x :x pos-y :y}) new-world)))
+          (mouse-up {:id morph-id}                    (fn [world id pos]
+                      
+                    (event-monad (draggable morph-id) world)))))
+
+(liftabel
+ (mouse-down {:target id :args [world] :position pos}
+             
+             (fn [props]
+               ; prepare for dragging
+               )     
+             (draggable world target-id)
+             ))
+
+
+
+(defn draggable [world target-id]
+            (select
+             (mouse-up world target-id pos
+                      ;incase this happens cancel dragging
+                      )
+            (mouse-move world target-id pos
+                        ; in case mouse moves, perofmr a drag
+                        (move-morph world pos) -> world*
+                        
+                        (draggbale ... )
+                                              ))) -> drag-event, world*
+
+(draggable 
+ -> [liftable inspectable resizable grabbable])
