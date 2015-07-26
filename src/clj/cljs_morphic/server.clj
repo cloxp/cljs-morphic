@@ -1,4 +1,5 @@
-(ns cljs-workspace.server
+(ns cljs-morphic.server
  (:require [rksm.cloxp-com.server :as server]))
 
-(server/start-server! :port 8084)
+(defn start-server []
+	(server/start-server! :port 8084))
