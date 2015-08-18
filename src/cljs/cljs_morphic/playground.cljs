@@ -2,10 +2,12 @@
   (:require-macros [cljs.core.async.macros :refer [go go-loop]])
   (:require [cljs-morphic.morph :refer [rectangle ellipse image
                                         rerender redefine move-morph morph-under-me
-                                        without get-description
-                                        world-state find-morph set-prop add-morphs-to
-                                        evolve redefinitions hot-swapping compile-props default-meta
-                                        read-morph]]
+                                        without get-description $morph
+                                        world-state set-prop add-morphs-to
+                                        evolve redefinitions compile-props default-meta
+                                        read-morph description properties text]]
+            [fipp.edn :refer [pprint]]
+            [fresnel.lenses :refer [fetch putback]]
             [cljs-morphic.morph.editor :refer [ace-editor set-editor-value]]
             [cljs-morphic.morph.window :refer [window]]
             [cljs-morphic.morph.halo :refer [halo]]
@@ -14,10 +16,9 @@
             [cljs-morphic.test :as t]
             [cljs.core.async :as async :refer [<! chan close!]]
             [cljs.reader :refer [read-string]]
-            [cljs.contrib.pprint :refer [pprint]]
             [cljs.core.match :refer-macros [match]]
             [rksm.cloxp-com.net :as net]
-            [cljs.test :refer-macros [deftest testing is run-tests]]))
+            [cemerick.cljs.test :refer-macros [deftest testing is run-tests]]))
 
 ; EVENT HANDLING
 
@@ -60,10 +61,10 @@
                                    (grab-cb world-state id current-pos)
                                    world-state) (partial grabbing-in-progress focus-id)]
          [:mouse-up-left _] [(-> world-state 
-                                     (move-morph focus-id (morph-under-me world-state focus-id))
-                                     (redefine focus-id (fn [self props submorphs]
-                                                    (self (dissoc props :drop-shadow) submorphs)))) 
-                                   (either grabbing dragging)]
+                               (move-morph focus-id (morph-under-me world-state focus-id))
+                               (redefine ($morph focus-id) (fn [self props submorphs]
+                                                             (self (dissoc props :drop-shadow) submorphs)))) 
+                                                           (either grabbing dragging)]
          :else :zero))
 
 (defn attempt-grab-from [pos focus-id world-state 
@@ -75,7 +76,7 @@
            (if (< 10 (eucl-distance pos new-pos))
              [(-> world-state
                 (move-morph focus-id "handMorph")
-                (redefine focus-id (fn [self props submorphs]
+                (redefine ($morph focus-id) (fn [self props submorphs]
                                      (self (assoc props :drop-shadow true) submorphs)))) 
               (partial grabbing-in-progress focus-id)]
              [world-state (partial attempt-grab-from pos focus-id)])
@@ -99,17 +100,17 @@
           new-pos (add-points (props :position) {:x (- dx) :y (- dy)})]
       (self (assoc props :position new-pos) submorphs)))
 
-(defn dragging-in-progress [pos focus-id world-state
+(defn dragging-in-progress [pos focus-id drag-cb world-state
                             {evt-type :type 
-                         {id :id drag-cb :on-drag} :target-props 
+                         {id :id} :target-props 
                          {new-pos :pos} :args}]
   (match [evt-type id]
          [:mouse-move _] 
          [(cond-> world-state
-            drag-cb (drag-cb focus-id)
-            true (redefine focus-id (fn [self props submorphs]
-                                 (drag self props submorphs pos new-pos)))) 
-          (partial dragging-in-progress new-pos focus-id)]
+            true (redefine ($morph focus-id) (fn [self props submorphs]
+                                 (drag self props submorphs pos new-pos)))
+            drag-cb (drag-cb focus-id (add-points pos {:x (- (:x new-pos)) :y (- (:y new-pos))}))) 
+          (partial dragging-in-progress new-pos focus-id drag-cb)]
          [:mouse-up-left _]
          (do
            (prn "May now be grabbed or dragged!")
@@ -123,7 +124,8 @@
   (match [evt-type id]
          [:mouse-move focus-id] 
            (if (< 10 (eucl-distance pos new-pos))
-             [world-state (partial dragging-in-progress pos focus-id)]
+             [world-state (partial dragging-in-progress pos focus-id 
+                                   (fetch world-state [($morph focus-id) properties :on-drag]))]
              [world-state (partial attempt-drag-from pos focus-id)])
          [:mouse-up-left _] 
              [world-state (either grabbing dragging)]
@@ -148,24 +150,28 @@
          :else :zero))
 
 (defn part-of-halo? [world-state id]
-  (let [[halo props submorphs] (find-morph world-state "halo")]
-    (not (nil? (find-morph (halo props submorphs) id)))))
+  (let [halo (fetch world-state ($morph "halo"))]
+    (not (nil? ($morph halo id)))))
 
 (defn focus-editor-on [world-state editor-id target-morph]
-  (-> world-state
-    (set-prop editor-id :target target-morph)
-    (observe editor-id
-           target-morph
-           (fn [world editor inspected-morph changes]
-             (-> world
-               (redefine editor (fn [e p s]
-                                  (set-editor-value 
-                                   (e p s) (get-description world inspected-morph changes))))))
-           (fn [world editor inspected-morph]
-             (-> world
-               (redefine editor (fn [e p s]
-                                  (set-editor-value 
-                                   (e p s) "Target Removed!"))))))))
+  (let [world-state (-> world-state
+                      (set-prop editor-id :target target-morph)
+                      (observe editor-id
+                               target-morph
+                               (fn [world editor inspected-morph _]
+                                 (-> world
+                                   (redefine ($morph editor) (fn [e p s]
+                                                               (set-editor-value 
+                                                                (e p s) (fetch world [($morph inspected-morph) description]))))))
+                               (fn [world editor inspected-morph]
+                                 (-> world
+                                   (redefine ($morph editor) (fn [e p s]
+                                                               (set-editor-value 
+                                                                (e p s) "Target Removed!")))))))]
+    (redefine world-state ($morph editor-id) 
+              (fn [e p s]
+                (set-editor-value 
+                 (e p s) (fetch world-state [($morph target-morph) description]))))))
 
 (defn inspection-active 
   [focused-morph-id world-state 
@@ -203,7 +209,7 @@
          [:mouse-down-right true] [(-> world-state
                                      (halo id)) (partial inspection-active id)]
          [:io _] [(do
-                    (redefine world-state target (fn [_ _ _]
+                    (redefine world-state ($morph target) (fn [_ _ _]
                                                (read-string (args :value)))))
                   (partial inspecting)]
          :else :zero))
@@ -212,12 +218,12 @@
 
 (defn observe [world-state observer observee observee-redefined observee-removed]
   (-> world-state
-    (redefine observer (fn [observer p s]
+    (redefine ($morph observer) (fn [observer p s]
                          (observer 
                           (assoc p :observee-redefined observee-redefined
                                    :observee-removed observee-removed)
                           s)))
-    (redefine observee (fn [observee p s]
+    (redefine ($morph observee) (fn [observee p s]
                          (observee 
                           (assoc p :observers (set (conj (p :observers) observer)))
                           s)))))
@@ -230,12 +236,12 @@
   redefined morph. i.e. morph inspectors have to update definition"
   (match [evt-type]
          [:redefined] [(reduce (fn [world observer]
-                                   (let [[_ {redefined-cb :observee-redefined} _] (find-morph world observer)]
+                                 (let [[_ {redefined-cb :observee-redefined} _] (fetch world ($morph observer))]
                                      (if redefined-cb
                                        (redefined-cb world observer observee changes)
                                        world))) world-state observers) observing] 
          [:removed] [(reduce (fn [world observer]
-                                 (let [[_ {removed-cb :observee-redemoved} _] (find-morph world observer)]
+                               (let [[_ {removed-cb :observee-redemoved} _] (fetch world ($morph observer))]
                                    (if removed-cb
                                      (removed-cb world observer observee)
                                      world))) world-state observers) observing]
@@ -247,8 +253,7 @@
   [(either grabbing dragging)
    inspecting
    observing
-   hand
-   hot-swapping])
+   hand])
 
 (def default-world-state
   [(rectangle {:id "world" 
@@ -257,6 +262,129 @@
                   :fill "darkgrey"})
    (rectangle {:id "handMorph" :fill "red" :extent {:x 2 :y 2}})
    (ace-editor "Welcome to cljs-morphic!" {:x 0 :y 0} {:x 500 :y 1000} "world-editor")])
+
+(defn tree [stem-pos]
+  (rectangle
+  {:fill "brown",
+   :inspectable? true,
+   :grabbable? true,
+   :id "stub",
+   :extent {:y 62, :x 18},
+   :position stem-pos}
+  (ellipse
+   {:fill "green",
+    :inspectable? true,
+    :grabbable? true,
+    :id "cone",
+    :extent {:y 100, :x 100},
+    :position {:y -80, :x -40}})))
+
+(defn cenery [name position]
+  (rectangle
+   {:fill "blue",
+    :inspectable? true,
+    :grabbable? true,
+    :id name,
+    :extent {:y 179, :x 274},
+    :position position}
+   (tree {:y 95, :x 64})
+   (rectangle
+    {:fill "green",
+     :inspectable? true,
+     :grabbable? true,
+     :id (str name "meadow"),
+     :extent {:y 36, :x 274},
+     :position {:y 143, :x 0}})
+   (ellipse
+    {:fill "yellow",
+     :inspectable? true,
+     :draggable? true,
+     :id (str name "sun"),
+     :extent {:y 34, :x 37},
+     :position {:y 25, :x 205}})
+   (image
+    {:inspectable? true,
+     :draggable? true,
+     :id (str name "clouds"),
+     :extent {:y 101, :x 128},
+     :url "http://pngimg.com/upload/cloud_PNG16.png",
+     :position {:x 120, :y 9}})))
+
+(def PI js/Math.PI)
+
+(defn get-current-time
+  "current time as a map"
+  []
+  (let [d (js/Date.)]
+    {:hours (.getHours d)
+     :minutes (.getMinutes d)
+     :seconds (.getSeconds d)}))
+
+(defn angle-for-hour [hour]
+  (* (+ -0.25 (/ hour 12)) PI 2))
+
+(defn create-second-pointer [radius]
+  (rectangle 
+   {:id "SecondPointer"
+    :position {:x 0 :y -1.5}
+    :fill "red"
+    :stroke-width 2
+    :extent {:x (* 0.85 radius) :y 3}}))
+
+(defn create-minute-pointer [radius]
+  (rectangle {:id "MinutePointer"
+              :position {:x 0 :y -2}
+              :stroke-width 2
+              :extent {:x (* .7 radius) :y 4}}))
+
+(defn create-hour-pointer [radius]
+  (rectangle 
+   {:id "HourPointer"
+    :position {:x 0 :y -2.5}
+    :fill "darkblue"
+    :stroke-width 2
+    :extent {:x (* .5 radius) :y 5}}))
+
+(defn create-hour-label [label pos]
+  (text
+   {:id (str label "h")
+    :position pos
+    :text-string label
+    :font-family "Arial"
+    :allow-input false
+    :font-size 9
+    :extent {:x 17 :y 17}}))
+
+(defn point-from-polar [radius angle]
+  {:x (* radius (.cos js/Math angle)) :y (* radius (.sin js/Math angle))})
+
+(defn create-labels [radius]
+  (mapv #(create-hour-label % (point-from-polar (* radius .8) (angle-for-hour %))) (range 1 13)))
+
+(defn create-clock [bounds pos]
+  (let [radius (/ (bounds :x) 2)]
+    (ellipse {:id "Clock"
+              :position pos
+              :grabbable? true
+              :inspectable? true
+              :fps 1
+              :step '(fn [world id]
+                       (let [{:keys [hours minutes seconds]} (get-current-time)
+                             minutes (+ minutes (/ seconds 60))
+                             hours (+ hours (/ minutes 60))]
+                         (-> world 
+                           (set-prop "HourPointer" :rotation (angle-for-hour hours))
+                           (set-prop "MinutePointer" :rotation (* (+ -0.25 (/ minutes 60)) 2 PI))
+                           (set-prop "SecondPointer" :rotation (* (+ -0.25 (/ seconds 60)) 2 PI)))))
+              :extent bounds
+              :border-width 4
+              :border-color "darkgrey"
+              :fill "-webkit-gradient(radial, 50% 50%, 0, 50% 50%, 250, from(rgb(255, 255, 255)), to(rgb(224, 224, 224)))"
+              :drop-shadoe true}
+             (list 'create-labels radius) 
+             (list 'create-hour-pointer radius) 
+             (list 'create-minute-pointer radius) 
+             (list 'create-second-pointer radius))))
 
 (def custom-morphs
   [(-> (rectangle 
@@ -278,6 +406,13 @@
            :grabbable? true
            :inspectable? true
            :id "kyoto"})
+   '(let [{:keys [hours minutes seconds]} (get-current-time)
+                             minutes (+ minutes (/ seconds 60))
+                             hours (+ hours (/ minutes 60))]
+      (-> (create-clock {:x 300 :y 300} {:x 300 :y 300}) 
+                           (set-prop "HourPointer" :rotation (angle-for-hour hours))
+                           (set-prop "MinutePointer" :rotation (* (+ -0.25 (/ minutes 60)) 2 PI))
+                           (set-prop "SecondPointer" :rotation (* (+ -0.25 (/ seconds 60)) 2 PI))))
    (-> (rectangle {:position {:x 50 :y 50} 
                    :id "test" 
                    :draggable? true
