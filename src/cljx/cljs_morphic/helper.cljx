@@ -1,6 +1,9 @@
 (ns cljs-morphic.helper
-  #+cljs (:require [cljs.core.match :refer-macros [match]])
-  #+clj (:require [clojure.core.match :refer [match]]))
+  #+cljs (:require [cljs.core.match :refer-macros [match]]
+                   [clojure.data :refer [diff]]
+                   )
+  #+clj (:require [clojure.core.match :refer [match]]
+                  [clojure.data :refer [diff]]))
 
 (defn morph? [m]
   (match [m]
@@ -13,27 +16,119 @@
          :else false))
 
 (defn expanded-expression? [expr]
-  (and (meta expr) (not-empty (:expanded-expression (meta expr)))))
+  (and (meta expr) (:expanded-expression (meta expr))))
 
-(defn applicative [m]
-  "Transforms the edn representing a morph into
-  and applicative function.
-  Structure of new-submorphs
-  
-  (nil) -> nil
-  ([a b] [c]), (a b c), (a [b c]) -> [ a b c ... ]
-  
-  "
-  (fn [new-props & new-submorphs]
-    (let [[morph _ _] m
-          submorphs (apply concat (map (fn [m]
+(defn even-out [morphs]
+  (let [morphs (apply concat (map (fn [m]
                                            (if (morph? m)
                                              [m]
-                                             m)) new-submorphs))
-          submorphs (when submorphs (apply vector submorphs))] 
-      (with-meta (apply list morph 
+                                             m)) morphs))]
+    (when morphs (apply vector morphs))))
+
+(defn enum [xs]
+  (map vector (range) xs))
+
+(defn add-changes [cha chb]
+  "combine two different change sets naively, no merge!"
+  {; structural changes do not commute! Yet they may conflict, or
+   :recompile? (or (:recompile? cha) (:recompile? chb))
+   ; not make sense, if we add two conflicting changes of the same morph
+   :structure (concat (:structure cha) (:structure chb))
+   ; conflicing property changes are just overridden by the most recent change
+   :properties (merge (:properties cha) (:properties chb))})
+
+(defn diff-submorphs [morph-id new-submorphs old-submorphs]
+  (let [changes {:recompile? true
+                 :structure []
+                 :properties {}}
+        old# (hash (map #(-> % second :id) old-submorphs))
+        new# (hash (map #(-> % second :id) (even-out new-submorphs)))
+        is-old-submorphs? (fn [x]
+                            (cond
+                              (morph? x) false 
+                              (seq? x) 
+                              (= old# (hash (map (fn [m]
+                                                   (cond
+                                                     (morph? m)
+                                                     (-> m second :id)
+                                                     (expanded-expression? m)
+                                                     m)) (even-out x))))))]
+    (cond
+      ;if nothing changed, no changes
+      (= new# old#) (assoc changes :recompile? false)
+      ;if this morph was previously childless, we simply declare all new submorphs as added
+      (empty? old-submorphs) (assoc changes :structure 
+                                    (map #(list 'add-morph morph-id %) (even-out new-submorphs)))
+      ; if old submorph structure is entirely preserved:
+      ;  [ new [old]] -> add-before new or [[old] new] -> add-morph new
+      (some is-old-submorphs? 
+            new-submorphs) 
+      (let [before-id (-> old-submorphs first second :id)
+            add-before (take-while #(-> % is-old-submorphs? not) new-submorphs)
+            add-after (rest (drop-while #(-> % is-old-submorphs? not) new-submorphs))]
+        (assoc changes :structure 
+               (concat (map #(list 'add-morph-before morph-id before-id %) add-before)
+                       (map #(list 'add-morph morph-id %) add-after))))
+      :else
+      ; changes if old submorphs got completely scrambled, which is terrible
+      ; since this API enables flexibility, but does not convey the INTENT of the users
+      ; changes AT ALL. We therefore need to go and infer all the changes by hand.
+      ; Instead of using redefine for advanced reorganizing of the data, the user
+      ; should use putback lenses such as replace, add, add-before, remove instead.
+      (let [new-submorphs (even-out new-submorphs)
+            id->old-submorphs (into {} (map (fn [m] [(-> m second :id) m]) old-submorphs))
+            ; 1st: identify all known submorphs together with their idx
+            known-idx (filter (fn [[idx m]]
+                                (contains? id->old-submorphs (-> m second :id))) 
+                              (enum new-submorphs))
+            ; 2nd: identify all removed submorphs
+            id->new-submorphs (into {} (map (fn [m] [(-> m second :id) m]) new-submorphs))
+            removed (remove (fn [[_ {id :id} & _]]
+                              (contains? id->new-submorphs id)) 
+                            old-submorphs)
+            removed (map (fn [[_ {id :id} & _]] (list 'without id)) removed)
+            ; 3rd: Identify the last known submorph, after which only new or no morphs follow
+            [idx last-known] (last known-idx)
+            ; 4th: Associate all of the morphs AFTER the last known morph with (add-morph)
+            add-after (map #(list 'add-morph morph-id %) (drop (inc idx) new-submorphs))
+            ; 5th: For each known morph, identify all preceding new morphs and associate them
+            ;      with an (add-morph-before known-morph-id)
+            ;      [ . . idx . . . idx . . .idx]
+            ; 
+            add-before (apply concat 
+                         (for [[[idx-before _] [idx-after [_ {id :id} & _]]] 
+                               (partition 2 1 (concat [[-1 nil]] known-idx))]
+                           (map #(list 'add-morph-before morph-id id %) 
+                                (->> new-submorphs 
+                                  (take idx-after)
+                                  (drop (inc idx-before))))))]
+        (assoc changes :structure (concat removed add-before add-after))))))
+
+(defn diff-properties [old-props new-props]
+  {:recompile? false
+   :structure []
+   :properties (if-let [prop-changes (second (diff old-props new-props))]
+                 {(old-props :id) prop-changes}
+                 {})})
+
+(defn applicative [morph]
+  "Transforms the edn representing a morph into
+  and applicative function."
+  (fn [new-props & new-submorphs]
+    (let [[self old-props & old-submorphs] morph
+          old-changes (assoc (-> morph meta :changes) :recompile? false)
+          structure-changes (diff-submorphs (old-props :id) 
+                                  new-submorphs 
+                                  (apply vector old-submorphs))
+          property-changes (diff-properties old-props new-props)
+          new-changes (-> old-changes 
+                        (add-changes structure-changes) 
+                        (add-changes property-changes))
+          submorphs (even-out new-submorphs)
+          new-meta-data (assoc (meta morph) :changes new-changes)] 
+      (with-meta (apply list self 
                    new-props 
-                   submorphs) (meta m)))))
+                   submorphs) new-meta-data))))
 
 (defn apply-to-morph [function m]
   "Transforms the morph into an applicable and then applies
