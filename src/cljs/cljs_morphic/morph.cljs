@@ -1,26 +1,26 @@
 (ns cljs-morphic.morph
-  (:require-macros [cljs.core.async.macros :refer [go go-loop]])
-  (:require [goog.events :as events]
-            [goog.events.EventType :as EventType]
-            [cljs.core.async :as async :refer [>! <! put! chan timeout onto-chan]]
-            [cljs.contrib.pprint :refer [pprint]]
-            [clojure.walk :refer [walk]]
+  (:require-macros [cljs.core.async.macros :refer [go go-loop]]
+                   [fresnel.lenses :refer [deflens]])
+  (:require [cljs.core.async :as async :refer [>! <! put! chan timeout onto-chan]]
+            ; [fipp.edn :refer [pprint]]
+            [cljs.pprint :refer [pprint]]
             [om.core :as om :include-macros true]
             [om.dom :as dom :include-macros true]
-            [goog.style :as gstyle]
-            [goog.dom :as gdom]
             [cljs.reader :refer [read-string]]
+            [cljs.js]
             [cljs-morphic.event :as event :refer [signals]]
             [cljs-morphic.helper :refer [applicative add-points bottom-right apply-to-morph contains-rect?
-                                         bounds some-morph eucl-distance morph? expanded-expression?]
+                                         bounds some-morph eucl-distance morph? expanded-expression?
+                                         add-changes diff-submorphs]
              :refer-macros [morph-fn]]
             [cljs.core.match :refer-macros [match]]
-            [clojure.zip :as zip :refer [zipper node down right up children root replace path rights end?]]
             [clojure.string :refer [replace-first]]
             [clojure.data :refer [diff]]
             [rksm.cloxp-com.messenger :as m]
-            [rksm.cloxp-com.cloxp-client :as cloxp])
-  (:import [goog.events EventType]))
+            [rksm.cloxp-com.cloxp-client :as cloxp]
+            [fresnel.lenses :refer [fetch putback create-lens create-lens dissoc-trigger]])
+  (:import [goog.net XhrIo]
+           [goog.events EventType]))
 
 (enable-console-print!)
 
@@ -29,147 +29,332 @@
 
 (def redefinitions (chan))
 
-(declare world-state)
+(declare world-state current-namespace)
 
-(declare rectangle ellipse image text polygon ace-editor without)
+(declare rectangle ellipse image text polygon without)
 
-(declare rerender redefine on-drag read-morph)
+(declare rerender redefine on-drag read-morph find-morph)
 
-(defn merge-changes [cha chb]
-  {:removed (concat (:removed cha) (:removed chb))
-   :added (concat (:added cha) (:added chb))
-   :set-props (merge (:set-props cha) (:set-props chb))})
-
-(defn diff-morph [old-morph new-morph]
-  "Returns a dictionary containing all the changes between ma and mb.
-   This includes all changes in the props and also all changes within 
-   the submorphs."
-  ; determine changes in submorphs
-  (let [submorph-changes (merge-changes (-> old-morph meta :changes) (-> new-morph meta :changes))
-        [_ old-props _] old-morph
-        [_ new-props _] new-morph
-        [removed-props changed-props _] (diff old-props new-props)]
-    (if changed-props
-      (assoc-in submorph-changes  [:set-props (:id new-props)] changed-props)
-      changed-props)))
-
-(defn diff-submorphs [old-submorphs new-submorphs]
-  (let [old-ids (map (fn [expr]
-                       (if (expanded-expression? expr)
-                         (-> expr meta :abstraction-id)
-                         (-> expr second :id))) old-submorphs)
-        new-ids (map (fn [expr]
-                       (if (expanded-expression? expr)
-                         (-> expr meta :abstraction-id)
-                         (-> expr second :id))) new-submorphs)
-        [removed-morphs added-morphs _] (diff old-ids new-ids)
-        changed-props (:set-props (reduce merge-changes (map diff-morph old-submorphs new-submorphs)))]
-    {:removed removed-morphs
-     :added added-morphs
-     :set-props changed-props}))
+; LENSES
 
 (defn ast-type [x]
   (cond
-    (and (list? x) (morph? x)) :morph
+    (morph? x) :morph
     (expanded-expression? x) :expr
-    (vector? x) :vector))
+    (vector? x) :vector
+    :else x))
 
-(defn apply-changes-to [expr changes]
-  (list '-> expr
-        '(set-prop :id :prop :value)
-        '(without :id)
-        '(add-morphs-to :id :morphs)))
+(defmulti morphic-read 
+  "Traverses the given expression, scanning for non morphic expressions
+  which are then expanded such that they integrate into the morphic tree"
+  (fn [expr ns]
+    (ast-type expr)))
 
-(defmulti makenode ast-type)
+(defmethod morphic-read :vector 
+  ([morphs ns]
+   (mapv morphic-read morphs)))
 
-(defmulti get-children ast-type)
+(def morph-libs
+    {'cljs-morphic.morph :cljs
+     'cljs-morphic.morph.window :cljs
+     'cljs-morphic.morph.editor :cljs
+     'cljs-morphic.test :cljs})
 
-(defmethod get-children :morph [morph]
-  (let [[self props & submorphs] morph]
-                    submorphs))
+(defn get-file [url]
+  (let [c (chan)]
+    (.send XhrIo url
+      (fn [e]
+        (put! c (.. e -target getResponseText))))
+    c))
 
-(defmethod get-children :expr [expr]
-  (:expanded-expression (meta expr)))
+(defn browser-load [{:keys [name macros]} cb]
+  (if (contains? morph-libs name)
+    (go
+     (let [path (str "cloxp-cljs-build/out/" (cljs.js/ns->relpath name)
+                     "." (cljs.core/name (get morph-libs name)))
+           file (<! (get-file path))]
+       (cb {:lang :cljs :source file})))
+    (cb nil)))
 
-(defmethod get-children :vector [morph-col]
-  morph-col)
+(def st (cljs.js/empty-state))
 
-(defmethod makenode :morph [morph new-submorphs]
-  (let [[self props & old-submorphs] morph
-        old-changes (-> morph meta :changes)
-        _ (prn old-changes)
-        new-changes (when-not (empty? old-submorphs)
-                      (merge-changes old-changes (diff-submorphs old-submorphs new-submorphs)))]
-    (with-meta 
-      (apply list self props (filter not-empty new-submorphs))
-      (assoc (meta morph) :changes new-changes))))
+(cljs.js/eval
+   st
+   '(ns cljs.user (:require [cljs-morphic.morph :refer [ellipse rectangle image text set-prop add-morph add-morph-before without $morph]]
+                            [cljs-morphic.playground :refer [tree cenery 
+                                                             create-clock create-labels 
+                                                             create-hour-pointer 
+                                                             create-minute-pointer 
+                                                             create-second-pointer
+                                                             point-from-polar
+                                                             PI get-current-time angle-for-hour]]
+                            [cljs-morphic.test :refer [japanese-kitchen]]))
+   {:eval cljs.js/js-eval
+    :load browser-load}
+   (fn [c] c))
 
-(defmethod makenode :expr [expr new-expansion]
-  (let [expansion (:expanded-expression (meta expr))]
-    (if (morph? expansion)
-      (let [changes (diff-morph expansion new-expansion)]
-        (with-meta expr 
-          (assoc (meta (apply-changes-to expr changes)) 
-                 :expanded-expression new-expansion
-                 :changes changes)))
-      (let [new-morph-col (apply vector (filter not-empty new-expansion))
-            changes (map diff-morph expansion new-morph-col)]
-        (with-meta expr 
-          (assoc (meta (apply-changes-to expr changes)) 
-                 :expanded-expression new-morph-col
-                 :changes changes))))))
+(defn morph-eval [m]
+  (cljs.js/eval 
+   st
+   m
+   {:eval cljs.js/js-eval}
+   (fn [c] c)))
 
-(defmethod makenode :vector [morph-col new-morph-col]
-  (apply vector (filter not-empty new-morph-col)))
+(defn compile-props [morph props ns]
+  (let [compiled-props (morph-eval (select-keys props (-> morph meta :requires-compile)))]
+    (vary-meta morph assoc :compiled-props compiled-props)))
 
-(defn world-zipper [world]
-  (zipper ast-type 
-          get-children
-          makenode
-          world))
+(defmethod morphic-read :morph 
+  ([morph ns]
+   (let [[self props & submorphs] morph
+         morph (compile-props morph props ns)]
+     (with-meta 
+       (apply list self props (map morphic-read submorphs))
+       (meta morph)))))
 
-(defn find-morph-loc
-  [ast id]
-  (let [expr (node ast)
-        node-id (if (morph? expr)
-                  (-> expr second :id)
-                  (-> expr meta :abstraction-id))]
-    (if (= node-id id)
-      ast
-      (when-not (end? ast)
-        (find-morph-loc (zip/next ast) id)))))
+(defmethod morphic-read :expr 
+  ([expression ns]
+   (vary-meta expression update :expanded-expression morphic-read)))
 
-(defn find-morph [root-ast id]
-  (let [ast (world-zipper root-ast)
-        loc (find-morph-loc ast id)]
-    (when loc 
-      (let [m (node loc)
-            [self props & submorphs] m]
-        (with-meta (list (applicative m) props submorphs) (meta m))))))
+(defmethod morphic-read :default
+  ([new-expr ns]
+   (let [expansion (morph-eval new-expr)
+         expansion (if (morph? expansion)
+                     expansion
+                     (apply vector (remove nil? expansion)))]
+     (when new-expr 
+       (vary-meta new-expr 
+                  assoc :expanded-expression 
+                  (morphic-read expansion))))))
 
-(defn owner [root-ast id]
-   (when-let [loc (find-morph-loc root-ast id)]
-     (up loc)))
+(deflens it [x y] ; maybe 'self' is a better name than 'it'
+  :fetch x
+  :putback (cond
+             (vector? y) (apply vector (remove nil? y))
+             :else y))
+
+(defn redefine
+  ([expression redefinition]
+   (redefine expression it redefinition))
+  ([world-state lens redefinition]
+   (let [expr (fetch world-state lens)
+         [_ _ & submorphs] expr]
+     (if (morph? expr)
+                    (do
+                      (go (>! redefinitions {:type :redefined :target-props (fetch expr properties)}))
+                      (let [new-morph (apply-to-morph redefinition expr)
+                            [_ _ & new-submorphs] new-morph
+                            new-morph (if (-> new-morph meta :changes :recompile?)
+                                        (morphic-read new-morph)
+                                        new-morph
+                                        ; TODO: Also check for props that need to be compiled
+                                        )]
+                        (putback world-state lens new-morph)))
+       (putback world-state lens (morphic-read (redefinition expr))))))) 
+
+(defn update-changes [expr new-changes]
+  "Updates the expressions change meta-data without applying the changes"
+  (vary-meta expr assoc :changes new-changes))
+
+(declare add-morph add-morph-before without set-prop)
+
+(defmulti changes->form (fn [expr changes] (first expr)))
+
+(defmethod changes->form '-> 
+  ([[_ expr _] changes]
+   (changes->form expr changes)))
+
+(defmethod changes->form 'map
+  ([mapping-expr {struct-changes :structure
+                  id->prop-changes :properties}] 
+   (let [map-fn (second mapping-expr)
+         ; try to extract the prototype morph that is being mapped
+         [_ args prototype-morph] map-fn])
+   (apply list '-> mapping-expr
+     (concat struct-changes
+             (for [[morph prop-changes] id->prop-changes]
+               (apply concat (for [[prop value] prop-changes]
+                               (list 'set-prop morph prop value))))))))
+
+(defmethod changes->form 'for
+  ([for-expr {struct-changes :structure
+              id->prop-changes :properties}]
+   (apply list '-> for-expr
+     (concat struct-changes
+             (for [[morph prop-changes] id->prop-changes]
+               (apply concat (for [[prop value] prop-changes]
+                               (list 'set-prop morph prop value))))))))
+
+(defmethod changes->form :default 
+  ([expr {struct-changes :structure
+          id->prop-changes :properties}]
+   (apply list '-> expr
+     (concat struct-changes
+             (for [[morph prop-changes] id->prop-changes]
+               (apply concat (for [[prop value] prop-changes]
+                               (list 'set-prop morph prop value))))))))
+
+(defmulti apply-changes 
+  "Applies the changes to the expression and also updates the change meta-data accordingly"
+  (fn [expr changes] (ast-type expr)))
+
+(defmethod apply-changes :morph [morph changes]
+  (morph-eval (changes->form morph changes)))
+
+(defmethod apply-changes :expr [expr changes]
+  (let [new-expansion (apply-changes (-> expr meta :expanded-expression) changes)]
+    (vary-meta expr assoc :expanded-expression new-expansion)))
+
+; SUBMORPH LENS
+
+(defmulti putback-submorphs (fn [expr new-submorphs] (ast-type expr)))
+
+(defmethod putback-submorphs :morph [morph new-submorphs]
+  (redefine morph (fn [self props submorphs]
+                    (go (>! redefinitions {:type :redefined :target-props props}))
+                    (self props (remove nil? new-submorphs)))))
+
+(defn update-expression [expr]
+  "match the expression to the changes that affect the expression"
+  (let [changes (fetch expr changes)
+        new-expr (changes->form expr changes)]
+    (with-meta new-expr (meta expr))))
+
+(defmethod putback-submorphs :expr [expr new-submorphs]
+  (let [old-submorphs (fetch expr submorphs)
+        new-submorphs (apply vector (remove nil? new-submorphs))
+        new-changes (diff-submorphs 'it new-submorphs old-submorphs)
+        old-changes (-> expr meta :changes)]
+    (-> expr 
+    (vary-meta assoc :expanded-expression new-submorphs
+               :changes (add-changes old-changes new-changes))
+           update-expression)))
+
+; this will never happen, since (fetch [ vector ] [submorphs idx] == [idx])
+(defmethod putback-submorphs :vector [morphs new-submorphs]
+  (apply vector (remove nil? new-submorphs)))
+
+(defmethod putback-submorphs :default [expr compiled-expression]
+  compiled-expression)
+
+(deflens submorphs [expr new-submorphs]
+ :fetch 
+  (cond
+    (morph? expr)
+    (let [[self props & submorphs] expr] (apply vector submorphs))
+    
+    (expanded-expression? expr)
+    (let [expanded (-> expr meta :expanded-expression)]
+      (if (morph? expanded) 
+        [expanded]
+        (apply vector (remove nil? expanded))))
+    
+    (vector? expr) 
+    expr
+    :default
+    (fetch (morphic-read expr) submorphs))
+  :putback (putback-submorphs expr new-submorphs))
+
+; PROPERTIES LENS
+
+(deflens properties [morph new-properties]
+  :fetch (if (morph? morph)
+           (second morph)
+           (throw "Can not access properties of " morph))
+  :putback (redefine morph (fn [self old-properties submorphs]
+                              (self new-properties submorphs))))
+
+; DESCRIPTION LENS
+
+(deflens description [expr new-description]
+  :fetch 
+  (-> expr pprint with-out-str) ; TODO: Use cached description and changes to be faster
+  :putback
+  (cljs.reader/read-string new-description)) 
+
+; CHANGES LENS
+
+(deflens changes [expr new-changes]
+  :fetch (reduce add-changes 
+                 (merge {:structure [] :properties {}} (-> expr meta :changes)) 
+                 (map #(fetch % changes) (fetch expr submorphs)))
+  :putback (let [old-changes (-> expr meta :changes)]
+             (if (= old-changes new-changes)
+               expr
+               (apply-changes expr new-changes))))
+
+(defn enum [xs]
+  (map vector (range) xs))
+
+(defmulti morph-lens (fn [expr id lens]
+                       (ast-type expr)))
+
+(defmethod morph-lens :vector 
+  ([morphs id lens]
+   (some (fn [[idx m]]
+           (morph-lens m id (conj lens idx))) (enum morphs))))
+
+(defmethod morph-lens :expr 
+  ([expression id lens]
+   (if (= (-> expression meta :abstraction-id) id)
+     lens
+     (when-let [morphs (fetch expression submorphs)]
+       (morph-lens morphs id (conj lens submorphs))))))
+
+(defmethod morph-lens :morph 
+  ([morph id lens]
+   (if (= (fetch morph [properties :id]) id)
+       lens
+     (when-let [morphs (fetch morph submorphs)]
+         (morph-lens morphs id (conj lens submorphs))))))
+
+(defmethod morph-lens
+  :default
+  ([morphs id lens]
+   (if (every? #(or (morph? %) (expanded-expression? %)) (remove nil? morphs))
+       (some (fn [[idx m]]
+           (morph-lens m id (conj lens idx))) (enum morphs))
+     (do
+       (prn "PERF DEGREGATION! ")
+       (morph-lens (morphic-read morphs) id lens)))))
+
+(defn $morph 
+  ([id]
+   (create-lens
+    (fn [_ world-state]
+      (fetch world-state (morph-lens world-state id [it])))
+    (fn [_ world-state new-morph]
+      (putback world-state (morph-lens world-state id [it]) new-morph))))
+  ([world-state id]
+   (morph-lens world-state id [it])))
+
+; WORLD OPERATIONS
+
+(defn owner [world-state id]
+  (let [lens-path ($morph world-state id)]
+    (match (take-last 2 lens-path)
+           [submorphs (true :<< number?)] (fetch world-state (drop-last 2 lens-path))
+           :default nil)))
 
 (defn position-in-world 
   ([world-state id]
-   (position-in-world (find-morph-loc (world-zipper world-state) id)))
-  ([ast-loc]
-  "return the global position of the morph with id"
-  (if ast-loc 
-    (let [[_ {pos :position} _] (node ast-loc)] 
-      (add-points (position-in-world (up ast-loc)) pos))
-    {:x 0 :y 0})))
+   (position-in-world world-state ($morph world-state id) {:x 0 :y 0}))
+  ([parent lens-path pos]
+   (if (empty? lens-path)
+     pos
+     (let [next-morph (fetch parent (first lens-path))]
+       (if (morph? next-morph)
+         (position-in-world next-morph (rest lens-path) (add-points pos (fetch next-morph [properties :position])))
+         (position-in-world next-morph (rest lens-path) pos))))))
 
 (defn global-bounds [world-state morph-id]
-  (let [[_ {extent :extent} _] (find-morph world-state morph-id)]
+  (let [[_ {extent :extent} _] (fetch world-state ($morph morph-id))]
     [(position-in-world world-state morph-id) extent]))
 
 (defn contains-morph? [world-state morph other]
   (let [bounds-a (global-bounds world-state morph)
         bounds-b (global-bounds world-state other)
         contains (contains-rect? bounds-a bounds-b)]
-    (when contains (prn bounds-a " contains " bounds-b))
     contains))
 
 (defn move-morph [world-state id new-parent-id]
@@ -177,22 +362,15 @@
    with the new-parent-id. Additionally the relative position of
    the newly added morph is being adopted, so that it does not
    change position. This is a semantic expectation from a morphic move."
-  (prn "moving " id " to ->" new-parent-id)
   (if (not= id new-parent-id)
-    (let [[self props submorphs] (find-morph world-state id)
+    (let [moved-morph (fetch world-state ($morph id))
           {gpx :x gpy :y} (position-in-world world-state new-parent-id)
           global-pos (position-in-world world-state id)
-          relative-pos (add-points global-pos {:x (- gpx) :y (- gpy)})] 
-      (prn "relative-pos " relative-pos)
-      (prn "global-pos " global-pos)
+          relative-pos (add-points global-pos {:x (- gpx) :y (- gpy)})]
       (-> world-state
         (without id)
-        (redefine new-parent-id (fn [new-owner now-props now-submorphs]
-                                  (new-owner now-props
-                                             now-submorphs 
-                                             ; we also need to adapt the position
-                                             ; which is now relative to the new owner
-                                             (self (assoc props :position relative-pos) submorphs))))))
+        (add-morph new-parent-id moved-morph)
+        (set-prop id :position relative-pos)))
     world-state))
 
 (defn morph-under-me 
@@ -201,7 +379,7 @@
    ; We traverse the morph hierarchy just like a scenegraph
    (morph-under-me world-state "world" id))
   ([world-state container-id id]
-   (let [[_ _ submorphs] (find-morph world-state container-id)
+   (let [[_ _ & submorphs] (fetch world-state ($morph container-id))
          sub-container-id (some-morph (reverse submorphs) ; first match is the topmost morph
                               (fn [_ props _]
                                 (when (and
@@ -212,97 +390,68 @@
                                   (morph-under-me world-state (props :id) id))))]
      (or sub-container-id container-id))))
 
-(defn handle-morph-redefine [loc new-morph]
-  (let [new-ast (read-morph (zip/replace loc new-morph))
-        new-morph (node new-ast)
-        [_ new-props _] new-morph
-        redef-args {:id (:id new-props)
-                    :new-props new-props
-                    :restructured? (not= @(:hash (meta new-morph)) (hash new-morph))}]
-    (reset! (:hash (meta new-morph)) (hash new-morph))
-    (go 
-     (onto-chan redefinitions 
-                (map (fn [[_ props _]] 
-                       {:type :redefined :target-props props :args redef-args}) (path loc)) false)
-     (>! redefinitions {:type :redefined :target-props new-props :args redef-args}))
-    new-ast))
-
-(defn handle-morph-remove [loc old-morph]
-  (let [[_ old-props _] old-morph
-        redef-args {:id (:id old-props) 
-                    :restructured? true}]
-    (go 
-     (onto-chan redefinitions 
-                (map (fn [[_ props _]] 
-                       {:type :redefined :target-props props :args redef-args}) (path loc)) false))
-    (go (>! redefinitions {:type :removed :target-props old-props}))
-    (zip/remove loc)))
-
-(defn redefine 
-  ([world-state redefinition]
-   ; if no explicit ref is given, we will apply the transformation to all morphs in the current level
-   (let [ast (world-zipper world-state)]
-     (map (fn [m] (apply-to-morph redefinition m)) ast (children ast))))
-  ([world-state id redefinition]
-   (let [ast (world-zipper world-state)
-         ast-loc (find-morph-loc ast id)]
-     (if ast-loc
-       (let [old-morph (node ast-loc)
-             redefined-structure (apply-to-morph redefinition old-morph)
-             new-ast (if redefined-structure
-                       (handle-morph-redefine ast-loc redefined-structure)
-                       (handle-morph-remove ast-loc old-morph))]
-         (root new-ast))
-       world-state))))
-
 ; MORPH FUNCTIONS
 
 (defn set-prop [world id prop-name prop-value]
   "Set the property prop-name of morph with id in world to prop-value"
-  (-> world (redefine id (fn [self props submorphs]
-                           (self (assoc props prop-name prop-value) 
-                                 submorphs)))))
+  (putback world [($morph id) properties prop-name] prop-value))
 
 (defn add-morphs-to [world id morphs]
   "Add collection of morphs to the morph with id in world"
-  (-> world (redefine id (fn [self props submorphs]
+  (-> world (redefine ($morph id) (fn [self props submorphs]
                            (self props 
                                  morphs
                                  submorphs)))))
 
+(defn add-morph [world id morph]
+  "Add single morph to the morph with id"
+  (-> world (redefine ($morph id) (fn [self props submorphs]
+                           (self props
+                                 submorphs
+                                 morph)))))
+
+(defn add-morph-before [world id before-id morph]
+  "Just as add-morph, but adds morph in front of the morph with before-id"
+  (-> world (redefine ($morph id) (fn [self props submorphs]
+                                    (let [[before after] (split-with (fn [[_ {:id id} & _]]
+                                                                     (not= id before-id)) 
+                                                                     submorphs)]
+                                      (self props
+                                            before
+                                            morph
+                                            after))))))
+
 (defn without [world id]
   "Return a world without the morph with the given id."
-  (-> world (redefine id (fn [self props submorphs]))))
+  (redefine world ($morph id) (fn [self props submorphs])))
 
 (defn get-description 
   ([world-state id]
    "In this case we just return a plain old new description. This is kind of expensive though."
-   (let [morph (find-morph world-state id)
-         [self props submorphs] morph]
-     (reset! (get (meta morph) :cached-code) (-> (self props submorphs)
-                                                 pprint
-                                                 with-out-str))))
+   (fetch world-state [($morph id) description]))
+  
   ([world-state id change]
    "If we supply a change {:id :prop :value} with our request, we return a description
     based on the previously cached one and just replace the changed information
     with regexp magic."
-   (let [morph (find-morph world-state id)
+   (let [morph (fetch world-state ($morph id))
          [self props submorphs] morph
+         ; THIS SHOULD BE HANDLED BY THE LENS. META DATA MAY NOT BE TOUCHED BY THE USER
          cached-code (:cached-code (meta morph))
          morph-re (str "\\{[^\\(]*\\:id\\s\\\"" (:id change) "\\\"[^\\(]*\\}(\n?)")
          new-props (:new-props change)]
      (if (or (:restructured? change) (nil? @cached-code))
-       (do
+      (do
          ; we have not cached or the morph got moved, so the change is not helpful at all
          (reset! cached-code (-> (self props submorphs)
                                  pprint
                                  with-out-str)))
-       (do
+      (do
          ; we have cached the value previously, so we can now just apply a regexp substitute
          ; or just return the cached value
          (if (nil? new-props)
-           @cached-code
-           (swap! cached-code #(replace-first % (re-pattern morph-re)
+          @cached-code
+          (swap! cached-code #(replace-first % (re-pattern morph-re)
                                               (-> new-props 
                                                 pprint
                                                 with-out-str)))))))))
@@ -349,7 +498,7 @@
 (defn get-plain-css [value]
   value)
 
-(defn get-transform-css [{rotation :Rotation, scale :Scale, pivot :PivotPoint, 
+(defn get-transform-css [{rotation :rotation, scale :scale, pivot :pivot-point, 
                           :or {rotation 0, scale 1, pivot {:x 0, :y 0}}}]
   {html5TransformProperty (str "rotate(" (mod (/ (* rotation 180) js/Math.PI) 360) "deg) scale(" scale "," scale ")")
    html5TransformOriginProperty (str (:x pivot) "px " (:y pivot) "px")})
@@ -377,6 +526,43 @@
                  :css (get-plain-css value)
                  ;; more to come... 
                  nil)) props)))
+
+; TEXT
+
+(defn get-font-family-css [family-name]
+  {"fontFamily" family-name})
+
+(defn get-font-size-css [size]
+  {"fontSize" (str size "pt")})
+
+(defn get-max-text-height-css [height]
+  {"maxHeight" (str height "px")})
+
+(defn get-max-text-width-css [width])
+
+(defn get-min-text-height-css [height])
+
+(defn get-min-text-width-css [height])
+
+(defn get-text-color-css [color]
+  {"textColor" color})
+
+(defn get-prevent-selection-css [value]
+  (when (false? value) {"WebkitUserSelect" "none"}))
+
+(defn extract-text-css [props]
+     (apply merge 
+       (map (fn [[prop value]]               
+          (case prop 
+               :font-family (get-font-family-css value)
+               :font-size (get-font-size-css value)
+               :max-text-height (get-max-text-height-css value)
+               :max-text-width (get-max-text-width-css value)
+               :min-text-height (get-min-text-height-css value)
+               :min-text-width (get-min-text-width-css value)
+               :text-color (get-text-color-css value)
+               :allow-input (get-prevent-selection-css value)
+               nil)) props)))
 
 (defn extract-morph-css [props]
   (dict->js
@@ -409,150 +595,20 @@
               (concat morphs morph)
               (concat morphs [morph]))) [] morphs))
 
-; COMPILATION
-
-(def current-namespace (atom "cljs-morphic.morph"))
-
-(def cljs-compile-handler
-  '(do
-     (require '[rksm.cloxp-cljs.ns.internals]
-              '[cljs.repl :as repl]
-              '[rksm.cloxp-com.cljs-repl :as cljs-repl]
-              '[clojure.tools.reader :refer [read-string]]
-              '[rksm.cloxp-com.messenger :as m]
-              '[rksm.cloxp-com.server :as s])
-     (fn [con msg]
-       
-       ; the clopx cljs passive repl env
-       (defrecord CloxpCljsPassiveReplEnv [server client-id]
-         repl/IJavaScriptEnv
-         (-setup [this opts] {:status :success :value nil})
-         (-evaluate [this filename line js] {:status :success :value js})
-         (-tear-down [_]))
-       
-       (let [client-id (-> msg :data :cloxp-client)
-             {:keys [server] :as connection} (s/find-connection client-id)
-             compiled-js (cljs.env/with-compiler-env (:compiler-env (rksm.cloxp-cljs.ns.internals/ensure-default-cljs-env))
-                           (cljs-repl/eval-cljs
-                            (read-string (get-in msg [:data :exp]))
-                            (->CloxpCljsPassiveReplEnv server client-id)
-                            {:ns-sym (symbol (-> msg :data :required-namespace))}))]
-         (m/send con (m/prep-answer-msg con msg compiled-js false))))))
-
-(defn start-cljs-compile-service [con]
-  (go
-   (let [register-msg {:action "register"
-                       :data {:id (:id con)
-                              :cloxp-client? true
-                              :services (-> con :services deref keys)
-                              :document-url (. js/document -URL)}}
-         add-service-msg {:action "add-service"
-                          :data {:name "cljs-compile-service" :handler (str cljs-compile-handler)}}
-         client-id (:id con)
-         register-answer (<! (m/send con register-msg))
-         add-service-answer (<! (m/send con add-service-msg))]
-     (prn "Registering CLJS compilation for client: " client-id)
-     (if (= "OK" (-> add-service-answer :message :data))
-       (prn "Added CLJS compilation service!")
-       (prn (str "CLJS compilation failed to initialize! Response: " add-service-answer))))))
-
-(defn compile-cljs [con exp]
-  (go
-   (let [eval-cljs-msg {:action "cljs-compile-service"
-                        :data {:exp (str exp) 
-                               :cloxp-client (:id con) 
-                               :required-namespace @current-namespace}}
-         compile-cljs-result (<! (m/send con eval-cljs-msg))
-         code (-> compile-cljs-result :message :data)
-         res (js/eval code)]
-     res)))
-
-(defn compile-morph [morph-id morph-description]
-  (go (>! signals {:type :compile-morph-request :target-props {:id morph-id} :args {:form morph-description}})))
-
-(defn compile-props [morph]
-  (let [[self props & submorphs] morph
-        meta-data (meta morph)]
-    (go (>! signals {:type :compile-props-request 
-                     :target-props {:id (:id props)} 
-                     :args {:form (select-keys props @(meta-data :requires-compile))}}))))
-
-(defn compile-expr [expression expr-ref]
-  (go (>! signals {:type :compile-expression-request
-                   :target-props {:ref expr-ref}
-                   :args {:form expression}})))
-
-(defn hot-swapping [world-state {evt-type :type 
-                                 {morph-id :id
-                                  expr-ref :ref} :target-props 
-                                 {compiled-cljs :compiled-cljs
-                                  expression :form} :args}]
-  (match [evt-type compiled-cljs]
-         [(:or :compile-morph-request
-               :compile-props-request
-               :compile-expression-request) nil] 
-         (do
-           (when expression 
-             (cloxp/with-con 
-               (fn [con]
-                 (go (let [compiled-cljs (<! (compile-cljs con expression))]
-                       (>! signals {:type evt-type 
-                                    :target-props {:id morph-id :ref expr-ref} 
-                                    :args {:compiled-cljs compiled-cljs
-                                           :form expression}}))))))
-           :zero)
-         ; If the compiled-cljs is NOT nil, the request has been served
-         ; and we can plug the compiled cljs into the world
-         [:compile-morph-request cljs] [(redefine world-state morph-id 
-                                                  (fn [_ _ _]
-                                                    compiled-cljs)) hot-swapping]
-         [:compile-props-request cljs] [(redefine world-state morph-id 
-                                                  (fn [self props submorphs]
-                                                    (let [m (self props submorphs)
-                                                          meta-data (meta m)]
-                                                      (swap! (meta-data :compiled-props) 
-                                                             merge cljs)
-                                                      m))) hot-swapping]
-         [:compile-expression-request cljs] [(let [ast (world-zipper world-state)
-                                                   ast-loc (find-morph-loc ast expr-ref)
-                                                   new-ast (root (zip/replace ast-loc 
-                                                                  (with-meta expression
-                                                                    {:abstraction-id expr-ref
-                                                                     :expanded-expression cljs})))]
-                                               (go 
-                                                (onto-chan redefinitions 
-                                                           (map (fn [[_ props _]] 
-                                                                  {:type :redefined :target-props props :args {:restructured? true}}) (path ast-loc)) false))
-                                               new-ast) hot-swapping]
-         :else :zero))
-
 (defn default-meta [morph]
   (let [[self props & submorphs] morph]
     {:cached-code (atom nil) ; holds the stringified ast pretty printed to prevent unnessecary re-pprints
-     :compiled-props (atom {}) ; dictionary of all props that need to be compiled and the compiled values
-     :hash (atom (hash morph)) ; hash used to determine wether the strucutre of the morph hierarchy has changed
-     ; TODO: Find a better way to determine if we have functions in our props
+     :compiled-props {} ; dictionary of all props that need to be compiled and the compiled values
      :requires-compile (->> props
                          (filter #(when 
                                     (seq? (val %)) 
                                     (-> % val first (= 'fn))))
-                         keys 
-                         atom)}))
-
-(defn not-yet-compiled? [morph]
-  (let [meta-data (meta morph)]
-    (and meta-data 
-         (-> meta-data :requires-compile deref not-empty) 
-         (not= 
-          @(:requires-compile meta-data) 
-          (keys @(:compiled-props meta-data))))))
+                         keys)}))
 
 (defn ensure-meta [morph]
   (let [morph (if (meta morph)
                 morph
                 (with-meta morph (default-meta morph)))]
-    (when (not-yet-compiled? morph)
-        (compile-props morph))
     morph))
 
 (defn generate-expr-token [expr]
@@ -560,30 +616,6 @@
 
 (defn scheduled-for-compile? [expr]
   (and (meta expr) (-> expr meta :abstraction-id)))
-
-(defn read-morph [ast-loc]
-  (let [expr (node ast-loc)]
-    (if (vector? expr)
-      (zip/prev (read-morph (zip/next ast-loc)))
-      (if (morph? expr)
-        (let [ast-loc (if (end? (zip/next ast-loc)) 
-                        ast-loc
-                        (zip/prev (read-morph (zip/next ast-loc))))
-              morph (ensure-meta (node ast-loc))]
-          (zip/replace ast-loc morph))
-        (if (expanded-expression? expr)
-          (if (end? (zip/next ast-loc)) 
-                        ast-loc
-                        (zip/prev (read-morph (zip/next ast-loc))))
-          (let [ast-loc (if (zip/right ast-loc) 
-                          (zip/left (read-morph (zip/right ast-loc)))
-                          ast-loc)
-                expr-token (generate-expr-token expr)]
-            (if (scheduled-for-compile? expr)
-              ast-loc
-              (do
-                (compile-expr expr expr-token)
-                (zip/replace ast-loc (with-meta (list '-> expr) {:abstraction-id expr-token}))))))))))
 
 (defn rectangle [props & submorphs]
   (ensure-meta (apply list 'rectangle props (even-out submorphs))))
@@ -635,19 +667,22 @@
 (defn render-placeholder [morph]
   nil) ; render nothing. Its fine.
 
-(defn render [expr]
-  (if-not (morph? expr)
-    (when (expanded-expression? expr)
-      (let [morph (:expanded-expression (meta expr))] 
-        (if (morph? morph)
-          (render morph)
-          (apply dom/div nil (map render morph)))))
-    (if (not-yet-compiled? expr)
-      ; we encountered an expression that is not yet ready for rendering
-      (render-placeholder expr)
-      ; we have to branch into the expressions meta-data to continue rendering
-      (let [[self props & args] expr
-            props (merge props @(:compiled-props (meta expr)))] 
+(defmulti render 
+  "render function, that traverses a morph tree and derives
+  a tree of om-components"
+  (fn [expr ns]
+    (ast-type expr)))
+
+(defmethod render :expr [expr]
+  (let [morph (-> expr meta :expanded-expression)] 
+    (render morph)))
+
+(defmethod render :vector [morphs]
+  (apply dom/div nil (map render morphs)))
+
+(defmethod render :morph [morph]
+  (let [[self props & args] morph
+            props (merge props (-> morph meta :compiled-props))] 
           (match [self props args]
                ['rectangle {:id id} submorphs] (om/build render-rectangle [props submorphs] {:react-key id})
                ['ellipse {:id id} submorphs] (om/build render-ellipse [props submorphs] {:react-key id})
@@ -655,7 +690,7 @@
                ['image {:id id} submorphs] (om/build render-image [props submorphs] {:react-key id})
                ['polygon {:id id} submorphs] (om/build render-polygon [props submorphs] {:react-key id})
                ['io {:id id} submorphs] (om/build render-io-morph [props submorphs] {:react-key id})
-               :else (prn "Can not render: " expr))))))
+               :else (prn "Can not render: " morph))))
 
 (defn render-rectangle [[props submorphs]]
   (reify
@@ -689,6 +724,24 @@
                                                   :marginLeft "-2px"}}
                     (map render submorphs))))))))
 
+(defn create-text-node [text-props]
+  (dom/span #js {:className "visible Selection"
+                 :contentEditable (or (not (contains? text-props :allow-input)) 
+                                      (:allow-input text-props))
+                 :style (clj->js (extract-text-css text-props))
+                 :ref "myInput"} (:text-string text-props)))
+
+(defn render-text [[props _]] ; text morphs do not render submorphs
+  (reify 
+    om/IRender
+    (render [self]
+            ; morph
+            (dom/div (extract-html-attributes props)
+              ;shape  
+              (dom/div (clj->js {:style (assoc (extract-morph-shape-css props) "cursor" "default")
+                                 :className "Morph Text"})
+                (create-text-node props))))))
+
 (defn render-image [[props submorphs]]
   (reify
     om/IRender
@@ -697,7 +750,7 @@
             (apply dom/div (extract-html-attributes props)
               ;shape
               (dom/img (clj->js {:style (extract-morph-shape-css props)
-                                 :draggable false
+                                 ; :draggable false
                                  :src (props :url)}))
               (map render submorphs)))))
 
@@ -764,7 +817,6 @@
     (cloxp/with-con
       (fn [con]
         (go
-         (<! (start-cljs-compile-service con))
          (loop [world init-world
                 transitions init-transitions
                 current-signal {:type nil ; the type of signal, i.e. mouse-move, redefine, step...
@@ -786,7 +838,7 @@
     new-worlds))
 
 (om/root
- render-root
- world-state
- {:target (. js/document (getElementById "app"))
+  render-root
+  world-state
+  {:target (. js/document (getElementById "app"))
   :tx-listen (fn [tx-data world-state])})
