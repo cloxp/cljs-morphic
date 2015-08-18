@@ -1,13 +1,22 @@
 <head>
     <title>cljs test</title>
-  <style type="text/css"></style></head>
+  <style type="text/css">
+  div.ace_scrollbar { z-index: 0 !important; }
+  div.ace_gutter { z-index: 0 !important; }
+  div.ace_layer.ace_cursor-layer { z-index: 0 !important; }
+  div.ace_layer.ace_text-layer { z-index: 0 !important; }
+  div.ace_layer.ace_marker-layer { z-index: 0 !important; }
+  div.ace_marker-layer .ace_bracket { z-index: 0 !important; }
+  </style></head>
   <body>
     <div id="app"></div>
-    <script src="react.js"></script>
-    
-  <script src="ace-builds/src-min-noconflict/ace.js" type="text/javascript"></script>
-  <script src="ace-builds/src-min-noconflict/mode-clojure.js" type="text/javascript"></script>
-  <script src="ace-builds/src-min-noconflict/theme-github.js" type="text/javascript"></script>
+    <script src="ace/lively-ace.js" type="text/javascript"></script>
+	<script src="ace/paredit-bundle.js" type="text/javascript"></script>
+	<script src="ace/ace.improvements.js" type="text/javascript"></script>
+	<script src="ace/ace.ext.lang.codemarker.js" type="text/javascript"></script>
+    <script src="ace/ace.ext.lang.ast-commands.js" type="text/javascript" charset="utf-8"></script>
+	<script src="ace/ace.ext.keys.js" type="text/javascript"></script>
+	<script src="ace/ace.ext.lang.paredit.js" type="text/javascript"></script>
 	<script src="cloxp-cljs-build/out/goog/base.js" type="text/javascript"></script>
 	<script src="cloxp-cljs-build/cloxp-cljs.js" type="text/javascript"></script>
 	<script type="text/javascript">goog.require("cljs_morphic.playground");</script>

@@ -3,7 +3,6 @@
   (:require [cljs-morphic.morph :refer [io]]
             [cljs-morphic.helper :refer-macros [morph-fn]]
             [cljs.core.async :as async :refer [>! <! put! chan timeout onto-chan]]
-            [om.core :as om :include-macros true]
             [om.dom :as dom :include-macros true]))
 
 ; EDITOR
@@ -44,15 +43,31 @@
                                         .-Mode)]
                      (.. ace-instance
                          getSession
-                         (on "change" #(change-handler ace-instance local-state)))
+                         (setMode (clojure-mode.)))
+                     (.. ace-instance 
+                         (setTheme "ace/theme/github"))
                      (.. ace-instance
-                         -commands
-                         (addCommand  (clj->js {:name "save"
+                         getSession
+                         (on "change" #(change-handler ace-instance local-state)))
+                    ; (.. ace-instance 
+                    ;     -keyBinding
+                    ;     (addKeyboardHandler (-> js/ace 
+                    ;                           (.require "ace/keyboard/emacs")
+                    ;                           .-handler)))
+                    (.. ace-instance
+                        -commands
+                        (addCommand (-> js/ace 
+                                      (.require "ace/commands/occur_commands")
+                                      .-occurStartCommand)))
+                    (.. ace-instance
+                        -commands
+                        (addCommands (.. js/ace -ext -lang -astCommands)))
+                     (.. ace-instance
+                        -commands
+                        (addCommand  (clj->js {:name "save"
                                                 :bindKey {:win "Ctrl-S" :mac "Ctrl-S" :sender "editor|cli"}
                                                 :exec #(save-handler ace-instance (props :output))})))
-                     (set! (.-$blockScrolling ace-instance) js/Infinity)
-                     (.setMode (.getSession ace-instance) (clojure-mode.))
-                     (.setTheme ace-instance "ace/theme/github")
+                     ; (set! (.-$blockScrolling ace-instance) js/Infinity)
                      (set-value! ace-instance (@local-state :edited-value))
                      (go-loop []
                        (let [new-value (<! (props :input))]
