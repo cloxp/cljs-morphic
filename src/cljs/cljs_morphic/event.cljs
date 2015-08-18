@@ -45,21 +45,29 @@
         (>! signals {:type :click-right :target-props props :args {:pos pos}})
         (>! signals {:type :click-left :target-props props :args {:pos pos}}))))))
 
-(defn extract-mouse-enter-handler [morph]
-  ; mouseEnter
-  )
+(defn extract-mouse-enter-handler [props]
+  (fn [e]
+    (.preventDefault e)
+    (go
+       (>! signals {:type :mouse-enter :target-props props :args {}}))))
 
-(defn extract-mouse-leave-handler [morph]
-  ; mouseLeave
-  )
+(defn extract-mouse-leave-handler [props]
+  (fn [e]
+    (.preventDefault e)
+    (go
+       (>! signals {:type :mouse-leave :target-props props :args {}}))))
 
 (defn extract-drag-enter-handler [morph]
-  ; mouseEnterDragging
-  )
+  (fn [e]
+    (.preventDefault e)
+    (go
+       (>! signals {:type :mouse-enter-dragging :target-props props :args {}}))))
 
 (defn extract-drag-leave-handler [morph]
-  ; mouseLeaveDragging
-  )
+  (fn [e]
+    (.preventDefault e)
+    (go
+       (>! signals {:type :mouse-leave-dragging :target-props props :args {}}))))
 
 (defn extract-mouse-move-handler [props]
   (fn [e]
