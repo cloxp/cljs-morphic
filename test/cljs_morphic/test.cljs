@@ -1,11 +1,11 @@
 (ns cljs-morphic.test
-  (:require [cemerick.cljs.test :as t]
+  (:require [cljs.test :as t]
             [fresnel.lenses :refer [fetch putback]]
-            [fipp.edn :refer [pprint]]
+            [cljs.pprint :refer [pprint write]]
             [cljs-morphic.morph :refer [morphic-read rectangle ellipse image redefine 
                                         move-morph without set-prop add-morphs-to add-morph
                                         submorphs properties description changes $morph it morph-lens]])
-  (:require-macros [cemerick.cljs.test :refer (is deftest with-test run-tests testing test-var)]))
+  (:require-macros [cljs.test :refer (is deftest run-tests testing)]))
 
 (def simple-ast 
   (rectangle {:id "a"}
@@ -76,8 +76,7 @@
   (testing "Description lens with plain lens composition"
     (is (= (fetch simple-world [description])
            (-> simple-world
-             pprint
-             with-out-str))))
+             (write :stream nil)))))
   
   (testing "Description changes are propagated back to morphs"
     (is 
@@ -95,7 +94,8 @@
   (testing "Changes lens reflects changes that have been introduced to morphs."
     (is (= (fetch simple-world [submorphs 1 changes])
            {:structure []
-            :properties {}}))
+            :properties {}
+            :recompile? false}))
     (is (= (-> simple-world 
              (putback [submorphs 1 properties :position] {:x 101 :y 102}) 
              (fetch [submorphs 1 changes]))
@@ -116,7 +116,8 @@
            :properties {"miso" {:fill "white"}}}))
       (is
        (= (fetch shiro-miso [submorphs 1 submorphs 0 submorphs 0 changes])
-          {:structure []
+          {:recompile? false
+           :structure []
            :properties {}}))))
   
   (testing "redefine captures add-morph change"
@@ -220,14 +221,15 @@
                         (image {:id "c" :position {:x 50 :y 50}}
                                (rectangle {:id "mops" :fill "brown"})))))
       (is (= (fetch changed-world [submorphs 1 submorphs 0 changes])
-             {:structure []
+             {:recompile? false
+              :structure []
               :properties {}}))
       (is (= (fetch changed-world [submorphs 1 changes])
-             {:recompile? true
+             {:recompile? false
               :structure ['(add-morph "c" (rectangle {:id "mops" :fill "brown"}))]
               :properties {"c" {:position {:x 50 :y 50}}}}))
       (is (= (fetch changed-world [changes])
-             {:recompile? true
+             {:recompile? false
               :structure ['(add-morph "c" (rectangle {:id "mops" :fill "brown"}))]
               :properties {"c" {:position {:x 50 :y 50}}
                            "b" {:fill "green"}}})))))
@@ -239,13 +241,14 @@
 (def expression-world
   (morphic-read 
    '(rectangle {:id "world" :position {:x 0 :y 0}}
-               (ellipse {:id "b" :position {:x 42 :y 42}}
-                        (map (fn [a b]
-                               (ellipse {:extent {:x a :y b}})) (range 3) (range 3))
-                        (ellipse {:id "tea" :fill "black"})
-                        (ellipse {:id "milk" :fill "white"}))
-               (image {:id "c" :position {:x 100 :y 100}}
-                      (japanese-kitchen {:x 42 :y 42})))))
+              (ellipse {:id "b" :position {:x 42 :y 42}}
+                       (map (fn [a b]
+                              (ellipse {:extent {:x a :y b}
+                                        :position {:x 10 :y 42}})) (range 3) (range 3))
+                       (ellipse {:id "tea" :fill "black"})
+                       (ellipse {:id "milk" :fill "white"}))
+              (image {:id "c" :position {:x 100 :y 100}}
+                                          (japanese-kitchen {:x 42 :y 42})))))
 
 (deftest test-lenses-and-expressions
   (testing "An abstraction is preserved yet its submorphs are also accessible."
@@ -287,18 +290,51 @@
              (fetch [($morph "c") submorphs 0]))
            '(-> (japanese-kitchen {:x 42 :y 42})
               (without "miso")))))
+  
   (testing "Morphs next to Expressions can still be removed."
     (is (= (-> expression-world
                  (without "tea"))
                '(rectangle {:id "world" :position {:x 0 :y 0}}
                            (ellipse {:id "b" :position {:x 42 :y 42}}
                                     (map (fn [a b]
-                                           (ellipse {:extent {:x a :y b}})) (range 3) (range 3))
+                                           (ellipse {:extent {:x a :y b}
+                                                     :position {:x 10 :y 42}})) (range 3) (range 3))
                                     (ellipse {:id "milk" :fill "white"}))
                            (image {:id "c" :position {:x 100 :y 100}}
                                   (japanese-kitchen {:x 42 :y 42})))))))
 
-(deftest test-render-lens)
+(deftest test-loop-mapping
+  (testing "Changing an unbound property of a looped morph, alters the prototype"
+    (is (= (putback expression-world [($morph "b") submorphs 0 submorphs 1 properties :fill] "red")
+           '(rectangle {:id "world" :position {:x 0 :y 0}}
+                           (ellipse {:id "b" :position {:x 42 :y 42}}
+                                    (map (fn [a b]
+                                           (ellipse {:extent {:x a :y b}
+                                                     :position {:x 10 :y 42}
+                                                     :fill "red"})) (range 3) (range 3))
+                                    (ellipse {:id "tea" :fill "black"})
+                                    (ellipse {:id "milk" :fill "white"}))
+                           (image {:id "c" :position {:x 100 :y 100}}
+                                  (japanese-kitchen {:x 42 :y 42}))))))
+  
+  (testing "Changing an unbound property of a looped morph, propagates change among all other looped morphs"
+    (is (let [w (putback expression-world [($morph "b") submorphs 0 submorphs 1 properties :fill] "red")]
+          (every? (fn [morph]
+                    (= "red" (-> morph second :fill))) (fetch w [($morph "b") submorphs 0 submorphs])))))
+  
+  (testing "Changing a bound property of a looped morph, alters the whole expression"
+    (is (= (putback expression-world [($morph "b") submorphs 0 submorphs 1 properties :extent] {:x 42 :y 42})
+           '(rectangle {:id "world" :position {:x 0 :y 0}}
+                           (ellipse {:id "b" :position {:x 42 :y 42}}
+                                    (-> (map (fn [a b]
+                                               (ellipse {:extent {:x a :y b}
+                                                         :position {:x 10 :y 42}
+                                                         :fill "red"})) (range 3) (range 3))
+                                      (set-prop [submorphs 1] :extent {:x 42 :y 42}))
+                                    (ellipse {:id "tea" :fill "black"})
+                                    (ellipse {:id "milk" :fill "white"}))
+                           (image {:id "c" :position {:x 100 :y 100}}
+                                  (japanese-kitchen {:x 42 :y 42})))))))
 
 (deftest test-set-prop
   (testing "Setting a prop redefines the morph in the ast."
