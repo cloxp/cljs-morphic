@@ -25,7 +25,7 @@
 (defn ace-editor [value pos ext name]
   (-> (io {:input (chan) ; this channel is to pipe information to the js-script (optional to prevent rerendering)
            :output (chan) ; this channel is collected by morphic to generate :io signals (mandatory)
-           :state (atom {:edited-value value})
+           :init-value value
            :extent ext
            :position pos
            :id name
@@ -36,8 +36,7 @@
                                         :style  {:height (-> props :extent :y) :width (-> props :extent :x)} 
                                         :className "ace"})))
            :init (fn [props dom-node]
-                   (let [local-state (props :state)
-                         ace-instance (.edit js/ace (props :id))
+                   (let [ace-instance (.edit js/ace (props :id))
                          clojure-mode (-> js/ace
                                         (.require "ace/mode/clojure")
                                         .-Mode)]
@@ -46,14 +45,6 @@
                          (setMode (clojure-mode.)))
                      (.. ace-instance 
                          (setTheme "ace/theme/github"))
-                     (.. ace-instance
-                         getSession
-                         (on "change" #(change-handler ace-instance local-state)))
-                    ; (.. ace-instance 
-                    ;     -keyBinding
-                    ;     (addKeyboardHandler (-> js/ace 
-                    ;                           (.require "ace/keyboard/emacs")
-                    ;                           .-handler)))
                     (.. ace-instance
                         -commands
                         (addCommand (-> js/ace 
@@ -67,10 +58,8 @@
                         (addCommand  (clj->js {:name "save"
                                                 :bindKey {:win "Ctrl-S" :mac "Ctrl-S" :sender "editor|cli"}
                                                 :exec #(save-handler ace-instance (props :output))})))
-                     ; (set! (.-$blockScrolling ace-instance) js/Infinity)
-                     (set-value! ace-instance (@local-state :edited-value))
+                     (set-value! ace-instance (:init-value props))
                      (go-loop []
                        (let [new-value (<! (props :input))]
-                         (set-value! ace-instance new-value)
-                         (swap! local-state assoc :edited-value new-value))
+                         (set-value! ace-instance new-value))
                        (recur))))})))
