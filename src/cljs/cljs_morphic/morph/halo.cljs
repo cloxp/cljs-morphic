@@ -35,12 +35,13 @@
                           :extent {:x 25 :y 25}
                           :id "resizeButton"
                           :position (add-points (props :extent) {:x 0 :y 0})
-                          :draggable? true 
-                          :on-drag (fn [world id {dx :x dy :y}]
+                          :draggable? true
+                          :target-id target-id
+                          :on-drag '(fn [world id {dx :x dy :y}]
                                      (-> world
-                                         (redefine ($morph target-id) 
-                                                   (fn [target props submorphs]
-                                                     (target (assoc props :extent (add-points (:extent props) {:x (- dx) :y (- dy)})) submorphs)))
+                                       (redefine ($morph (fetch world [($morph id) properties :target-id])) 
+                                                   (fn [self props submorphs]
+                                                     (self (assoc props :extent (add-points (:extent props) {:x (- dx) :y (- dy)})) submorphs)))
                                         (redefine ($morph "halo") 
                                                   (fn [halo props buttons]
                                                     (let [new-extent (add-points (:extent props) {:x (- dx) :y (- dy)})]
