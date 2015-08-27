@@ -2,11 +2,10 @@
   (:require-macros [cljs.core.async.macros :refer [go go-loop]])
   (:require [cljs-morphic.morph :refer [rectangle ellipse image
                                         rerender redefine move-morph morph-under-me
-                                        without get-description $morph
+                                        without get-description $morph it submorphs ast-type
                                         world-state set-prop add-morphs-to
                                         evolve redefinitions compile-props default-meta
-                                        read-morph description properties text]]
-            [fipp.edn :refer [pprint]]
+                                        morphic-read description properties text]]
             [fresnel.lenses :refer [fetch putback]]
             [cljs-morphic.morph.editor :refer [ace-editor set-editor-value]]
             [cljs-morphic.morph.window :refer [window]]
@@ -14,11 +13,11 @@
             [cljs-morphic.event :refer [signals]]
             [cljs-morphic.helper :refer [eucl-distance add-points morph?] :refer-macros [morph-fn]]
             [cljs-morphic.test :as t]
-            [cljs.core.async :as async :refer [<! chan close!]]
+		      	[cljs.pprint :refer [pprint]]
+            [cljs.core.async :as async :refer [>! <! chan close!]]
             [cljs.reader :refer [read-string]]
             [cljs.core.match :refer-macros [match]]
-            [rksm.cloxp-com.net :as net]
-            [cemerick.cljs.test :refer-macros [deftest testing is run-tests]]))
+            [cljs.test :refer-macros [deftest testing is run-tests]]))
 
 ; EVENT HANDLING
 
@@ -44,6 +43,16 @@
            :args {:pos pos}}] [(-> world-state
                                  (set-prop "handMorph" :position pos)) 
                                hand]
+         [{:type :mouse-enter
+           :target-props props
+           :args {:callback mouse-enter-cb}}] [(if mouse-enter-cb
+                                                 (mouse-enter-cb world-state ($morph (:id props)))
+                                                 world-state) hand]
+         [{:type :mouse-leave
+           :target-props props
+           :args {:callback mouse-leave-cb}}] [(if mouse-leave-cb
+                                                 (mouse-leave-cb world-state ($morph (:id props)))
+                                                 world-state) hand]
          :else :zero))
 
 ; GRABBING
@@ -125,7 +134,7 @@
          [:mouse-move focus-id] 
            (if (< 10 (eucl-distance pos new-pos))
              [world-state (partial dragging-in-progress pos focus-id 
-                                   (fetch world-state [($morph focus-id) properties :on-drag]))]
+                                   (-> (fetch world-state ($morph focus-id)) meta :compiled-props :on-drag))]
              [world-state (partial attempt-drag-from pos focus-id)])
          [:mouse-up-left _] 
              [world-state (either grabbing dragging)]
@@ -188,9 +197,7 @@
               (add-morphs-to "world" editor)
               (focus-editor-on editor-id focused-morph-id))) 
           (partial inspection-protected focused-morph-id)]
-         [:io _ _] [(do
-                      (pprint (args :value))
-                      world-state) 
+         [:io _ _] [world-state 
                     (partial inspection-protected focused-morph-id)]
          ; redefine the morph the editor is editing by compiling the new description and hot swapping it
          [:mouse-down-left _ "closeButton"] [(-> world-state 
@@ -206,11 +213,11 @@
                                {id :id inspectable? :inspectable? target :target} :target-props
                                args :args}]
   (match [evt-type inspectable?]
-         [:mouse-down-right true] [(-> world-state
-                                     (halo id)) (partial inspection-active id)]
+         [:mouse-down-right true] [(morphic-read (-> world-state
+                                                   (halo id))) (partial inspection-active id)]
          [:io _] [(do
                     (redefine world-state ($morph target) (fn [_ _ _]
-                                               (read-string (args :value)))))
+                                                            (morphic-read (read-string (args :value))))))
                   (partial inspecting)]
          :else :zero))
 
@@ -247,21 +254,59 @@
                                      world))) world-state observers) observing]
          :else :zero))
 
+(defmulti step (fn [lens world-state]
+                 (prn lens "and" world-state)
+                 (ast-type (fetch world-state lens))))
+
+(defmethod step :vector [morphs-ref world-state]
+  (reduce (fn [world-state idx]
+            (step (conj morphs-ref idx) world-state)) 
+          world-state 
+          (range (count (fetch world-state morphs-ref)))))
+
+(defmethod step :expr [expr-ref world-state]
+  (step (conj expr-ref submorphs) world-state))
+
+(defmethod step :morph [morph-ref world-state]
+  (let [morph (fetch world-state morph-ref)
+        world-state (if-let [step-fn (-> morph meta :compiled-props :step)]
+                      (if (fn? step-fn) 
+                        (do
+                          (prn step-fn)
+                          (step-fn world-state morph-ref))
+                        (do 
+                          (prn "Errornous step function: " step-fn)
+                          world-state))
+                      world-state)
+        [_ _ & submorphs] morph]
+    (if submorphs 
+      (step (conj morph-ref cljs-morphic.morph/submorphs) world-state)
+      world-state)))
+
+; (js/setInterval
+;   #(go (>! signals {:type :step}))
+;   1000)
+
+(defn stepping [world-state {evt-type :type}]
+  (match [evt-type]
+         [:step] [(step [it] world-state) stepping]
+         :else :zero))
+
 (def lively
   "A lively set of transitions. Enables, morphs to be grabbable, draggable, observable 
    and inspectable. This provides live and direct interaction with morphic objects."
   [(either grabbing dragging)
+   stepping
    inspecting
    observing
    hand])
 
 (def default-world-state
   [(rectangle {:id "world" 
-                  :extent {:x 1000 :y 1000} 
-                  :position {:x 500 :y 0} 
+                  :extent {:x 1500 :y 1000} 
+                  :position {:x 0 :y 0} 
                   :fill "darkgrey"})
-   (rectangle {:id "handMorph" :fill "red" :extent {:x 2 :y 2}})
-   (ace-editor "Welcome to cljs-morphic!" {:x 0 :y 0} {:x 500 :y 1000} "world-editor")])
+   (rectangle {:id "handMorph" :fill "red" :extent {:x 2 :y 2}})])
 
 (defn tree [stem-pos]
   (rectangle
@@ -334,6 +379,7 @@
 (defn create-minute-pointer [radius]
   (rectangle {:id "MinutePointer"
               :position {:x 0 :y -2}
+              :fill "darkblue"
               :stroke-width 2
               :extent {:x (* .7 radius) :y 4}}))
 
@@ -368,7 +414,7 @@
               :grabbable? true
               :inspectable? true
               :fps 1
-              :step '(fn [world id]
+              :step '(fn [world self-ref]
                        (let [{:keys [hours minutes seconds]} (get-current-time)
                              minutes (+ minutes (/ seconds 60))
                              hours (+ hours (/ minutes 60))]
@@ -403,6 +449,7 @@
               :id "eli"}))))
    (image {:url "http://www.daniellaondesign.com/uploads/7/3/9/7/7397659/464698_orig.jpg"
            :extent {:x 300 :y 500}
+           :position {:x 50 :y 50}
            :grabbable? true
            :inspectable? true
            :id "kyoto"})
