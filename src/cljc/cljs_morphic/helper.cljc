@@ -1,19 +1,11 @@
 (ns cljs-morphic.helper
-  #+cljs (:require [cljs.core.match :refer-macros [match]]
-                   [clojure.data :refer [diff]]
-                   )
-  #+clj (:require [clojure.core.match :refer [match]]
-                  [clojure.data :refer [diff]]))
+  #?(:cljs (:require [clojure.data :refer [diff]]
+                  [cljs.tools.reader :as reader]))
+  #?(:clj (:require [clojure.data :refer [diff]])))
 
 (defn morph? [m]
-  (match [m]
-         [([(:or 'rectangle
-                 'ellipse
-                 'image
-                 'io
-                 'polygon
-                 'text) _ & _] :seq)] true
-         :else false))
+  (or (-> m meta :morph?)
+      (some #(= % m) ['ellipse 'rectangle 'image 'polygon 'text 'io])))
 
 (defn expanded-expression? [expr]
   (and (meta expr) (:expanded-expression (meta expr))))
@@ -25,13 +17,99 @@
                                              m)) morphs))]
     (when morphs (apply vector morphs))))
 
+(defn default-meta [morph]
+  (let [[self props & submorphs] morph
+        compile-required-props (->> props
+                                 (filter #(when 
+                                            (seq? (val %)) 
+                                            (-> % val first (= 'fn))))
+                                 keys)]
+    {:cached-code (atom nil) ; holds the stringified ast pretty printed to prevent unnessecary re-pprints
+     :compiled-props {} ; dictionary of all props that need to be compiled and the compiled values
+     :changes {:recompile? (not (empty? compile-required-props))}
+     :requires-compile compile-required-props}))
+
+(defmulti read-morph (fn [expr]
+                       (cond
+                         (morph? expr) :morph
+                         (= 'map (first expr)) :map
+                         :default :expr)))
+
+(defmethod read-morph :morph 
+  [morph]
+  morph)
+
+(defmethod read-morph :map
+  [map-expr]
+  (let [[_ map-fn % rest-expr] map-expr]
+    (list 'quote map-expr)))
+
+(defmethod read-morph :expr
+  [expr]
+  (list 'quote expr))
+
+; MORPH FIXPOINTS
+
+(defn rectangle* [props & submorphs]
+  (apply list `rectangle* props submorphs))
+
+(defn ellipse* [props & submorphs]
+  (apply list `ellipse* props submorphs))
+
+(defn image* [props & submorphs]
+  (apply list `image* props submorphs))
+
+(defn text* [props & submorphs]
+  (apply list `text* props submorphs))
+
+(defn polygon* [props & submorphs]
+  (apply list `polygon* props submorphs))
+
+(defn io* [props & submorphs]
+  (apply list `io* props submorphs))
+
+(defn init-morph [self props submorphs]
+  (let [uncompiled-props (->> props
+                           (filter #(when 
+                                      (seq? (val %)) 
+                                      (-> % val first (= 'fn))))
+                           keys)
+        ; defer evaluation of the uncompiled props
+        deferred-props (reduce (fn [props prop-name]
+                        (update props prop-name #(list 'quote %))) props uncompiled-props)]
+    `(with-meta ~(apply list self deferred-props (map read-morph submorphs))
+      {:compiled-props ~(select-keys deferred-props uncompiled-props)
+       :changes {:recompile? false}
+       :morph? true
+       :description ~(str (apply list self props submorphs))})))
+
+; MORPH MACROS
+
+(defmacro rectangle [props & submorphs]
+  (init-morph `rectangle* props submorphs))
+
+(defmacro ellipse [props & submorphs]
+  (init-morph `ellipse* props submorphs))
+
+(defmacro image [props & submorphs]
+  (init-morph `image* props submorphs))
+
+(defmacro text [props & submorphs]
+  (init-morph `text* props submorphs))
+
+(defmacro polygon [props & submorphs]
+  (init-morph `polygon* props submorphs))
+
+(defmacro io [props & submorphs]
+  (init-morph `io* props submorphs))
+
 (defn enum [xs]
   (map vector (range) xs))
 
 (defn add-changes [cha chb]
   "combine two different change sets naively, no merge!"
   {; structural changes do not commute! Yet they may conflict, or
-   :recompile? (or (:recompile? cha) (:recompile? chb))
+   :recompile? (or (:recompile? cha) (:recompile? chb) false)
    ; not make sense, if we add two conflicting changes of the same morph
    :structure (concat (:structure cha) (:structure chb))
    ; conflicing property changes are just overridden by the most recent change
@@ -107,8 +185,8 @@
 (defn diff-properties [old-props new-props]
   {:recompile? false
    :structure []
-   :properties (if-let [prop-changes (second (diff old-props new-props))]
-                 {(old-props :id) prop-changes}
+   :properties (if-let [changed-props (keys (second (diff old-props new-props)))]
+                 {(old-props :id) (select-keys new-props changed-props)}
                  {})})
 
 (defn applicative [morph]
