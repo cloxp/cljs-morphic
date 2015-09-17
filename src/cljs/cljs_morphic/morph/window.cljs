@@ -1,13 +1,23 @@
 (ns cljs-morphic.morph.window
-  (:require [cljs-morphic.morph :refer [rectangle image ellipse text
-                                        set-prop position-in-world redefine $morph]]
-            [fresnel.lenses :refer [fetch]]
-            [cljs-morphic.helper :refer-macros [morph-fn] :refer [add-points]]))
+  (:require-macros [cljs-morphic.macros :refer [rectangle image ellipse text morph-fn]])
+  (:require [cljs-morphic.morph :refer [set-prop position-in-world redefine 
+                                        $morph properties submorphs without unsubscribe]]
+            [fresnel.lenses :refer [fetch dissoc-trigger putback]]
+            [cljs-morphic.helper :refer [add-points even-out]]))
 
 (declare window)
 
 (morph-fn layout-morph [self props submorphs]
      ((props :layout) self props submorphs))
+
+(defn unsubscribe-hierarchy [world id]
+  "Unsubscribe the morph (id) and all its children"
+  (prn (fetch world [($morph id) submorphs properties :id]))
+  (let [submorph-ids (fetch world [($morph id) submorphs properties :id])]  
+    (reduce (fn [w id]
+              (unsubscribe-hierarchy w id)) 
+            (unsubscribe world id) 
+            submorph-ids)))
 
 (def control-height 14)
 
@@ -16,17 +26,21 @@
    {:id (str "close-on-" target-id)
     :position {:x 10 :y 10}
     :fill "#ff6052"
-    :mouse-enter '(fn [world self-ref] 
+    :mouse-enter (fn [world self-ref] 
                     (redefine world self-ref 
                                 (fn [self props submorphs]
-                                  (self props (set-prop submorphs "close-label" :visible true)))))
-    :mouse-leave '(fn [world self-ref] 
+                                  (-> (self props submorphs)
+                                    (set-prop "close-label" :visible true)))))
+    :mouse-leave (fn [world self-ref] 
                     (redefine world self-ref 
                                 (fn [self props submorphs]
-                                  (self props (set-prop submorphs "close-label" :visible false)))))
-    :mouse-click '(fn [world self-ref]
-                    (let [target (fetch world [self-ref properties :target-id])]
-                      (without world target)))
+                                  (-> (self props submorphs)
+                                    (set-prop "close-label" :visible false)))))
+    :mouse-click (fn [world self-ref]
+                    (let [target-id (fetch world [self-ref properties :target-id])]
+                      (-> world 
+                        (unsubscribe-hierarchy target-id)
+                        (without target-id))))
     :extent {:x control-height :y control-height}
     :target-id target-id} 
    (text {:position {:x -2 :y -6}
@@ -42,18 +56,31 @@
     :position {:x 30 :y 10}
     :extent {:x control-height :y control-height}
     :fill "#ffbe06"
-    :mouse-enter '(fn [world self-ref] 
+    :mouse-enter (fn [world self-ref] 
                     (redefine world self-ref 
                                 (fn [self props submorphs]
-                                  (self props (set-prop submorphs "min-label" :visible true)))))
-    :mouse-leave '(fn [world self-ref] 
+                                  (-> (self props submorphs)
+                                    (set-prop "min-label" :visible true)))))
+    :mouse-leave (fn [world self-ref] 
                     (redefine world self-ref 
                                 (fn [self props submorphs]
-                                  (self props (set-prop submorphs "min-label" :visible false)))))
-    :mouse-click '(fn [world self-ref]
-                    (let [target (fetch world [self-ref :properties :target-id])
-                          width (fetch world [($morph target) :properties :extent :x])]
-                  (set-prop world target {:x width :y 30})))
+                                  (-> (self props submorphs)
+                                    (set-prop "min-label" :visible false)))))
+    :mouse-click (fn [world self-ref]
+                    (let [win (fetch world [self-ref properties :target-id])
+                          target (fetch world [($morph win) properties :target-id])]
+                      (if-let [prev-extent (fetch world [self-ref properties :prev-extent])]
+                        (-> world
+                          (putback [self-ref properties :prev-extent] dissoc-trigger)
+                          (set-prop win :extent prev-extent)
+                          (set-prop target :extent (update prev-extent :y - 30))
+                          (set-prop (str "resizer-on-" win) :visible true))
+                        (let [prev-extent (fetch world [($morph win) properties :extent])] 
+                          (-> world
+                            (putback [self-ref properties :prev-extent] prev-extent)
+                            (set-prop win :extent (assoc prev-extent :y 30))
+                            (set-prop target :extent (assoc prev-extent :y 0))
+                            (set-prop (str "resizer-on-" win) :visible false))))))
     :target-id target-id}
    (text {:position {:x -2 :y -6}
           :id "min-label"
@@ -78,7 +105,7 @@
                               :position (add-points (props :extent) {:x -25 :y -25})
                               :extent {:x 25 :y 25} 
                               :css {"cursor" "nwse-resize"}
-                              :on-drag '(fn [world id]
+                              :on-drag (fn [world id]
                                          (let [[_ {pos :position win :window-id target :target-id} _] (fetch world ($morph id))
                                                new-extent (add-points pos {:x 25 :y 25})]
                                            (-> world

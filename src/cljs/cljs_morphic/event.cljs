@@ -49,13 +49,13 @@
   (fn [e]
     (.preventDefault e)
     (go
-       (>! signals {:type :mouse-enter :target-props props :args {}}))))
+     (>! signals {:type :mouse-enter :target-props props :args {}}))))
 
 (defn extract-mouse-leave-handler [props]
   (fn [e]
     (.preventDefault e)
     (go
-       (>! signals {:type :mouse-leave :target-props props :args {}}))))
+     (>! signals {:type :mouse-leave :target-props props :args {}}))))
 
 (defn extract-drag-enter-handler [props]
   (fn [e]

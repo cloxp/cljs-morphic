@@ -1,27 +1,28 @@
 (ns cljs-morphic.playground
-  (:require-macros [cljs.core.async.macros :refer [go go-loop]])
-  (:require [cljs-morphic.morph :refer [rectangle ellipse image
-                                        rerender redefine move-morph morph-under-me
-                                        without get-description $morph it submorphs ast-type
+  (:require-macros [cljs.core.async.macros :refer [go go-loop]]
+                   [cljs-morphic.macros :refer [morph-fn ellipse rectangle image io polygon text]])
+  (:require [cljs-morphic.evaluator :refer [macro-info morph-eval morph-eval-str init-compiler]]
+            [cljs-morphic.morph :refer [rerender redefine move-morph morph-under-me changes
+                                        without $morph it submorphs ast-type
                                         world-state set-prop add-morphs-to
-                                        evolve redefinitions compile-props default-meta
-                                        morphic-read description properties text]]
+                                        evolve redefinitions default-meta
+                                        description properties observe add-morph]]
             [fresnel.lenses :refer [fetch putback]]
             [cljs-morphic.morph.editor :refer [ace-editor set-editor-value]]
             [cljs-morphic.morph.window :refer [window]]
             [cljs-morphic.morph.halo :refer [halo]]
             [cljs-morphic.event :refer [signals]]
-            [cljs-morphic.helper :refer [eucl-distance add-points morph?] :refer-macros [morph-fn]]
-            [cljs-morphic.test :as t]
+            [cljs-morphic.helper 
+             :refer [eucl-distance add-points morph? find-bound-props]]
+            [cljs-morphic.test :as t :refer [japanese-kitchen]]
 		      	[cljs.pprint :refer [pprint]]
             [cljs.core.async :as async :refer [>! <! chan close!]]
             [cljs.reader :refer [read-string]]
             [cljs.core.match :refer-macros [match]]
-            [cljs.test :refer-macros [deftest testing is run-tests]]))
+            [cljs.test :refer-macros [deftest testing is run-tests]]
+            [rksm.cloxp-com.cloxp-client :as cloxp]))
 
 ; EVENT HANDLING
-
-(run-tests 'cljs-morphic.test)
 
 (defn either [transition-a transition-b]
   "Ensures that only one of the given transitions is active at the same time!"
@@ -45,14 +46,25 @@
                                hand]
          [{:type :mouse-enter
            :target-props props
-           :args {:callback mouse-enter-cb}}] [(if mouse-enter-cb
-                                                 (mouse-enter-cb world-state ($morph (:id props)))
-                                                 world-state) hand]
+           :args {}}] (do
+                        [(if-let [mouse-enter-cb (:mouse-enter props)]
+                           (mouse-enter-cb world-state ($morph (:id props)))
+                           world-state) hand])
          [{:type :mouse-leave
            :target-props props
-           :args {:callback mouse-leave-cb}}] [(if mouse-leave-cb
-                                                 (mouse-leave-cb world-state ($morph (:id props)))
-                                                 world-state) hand]
+           :args {}}] [(if-let [mouse-leave-cb (:mouse-leave props)]
+                         (mouse-leave-cb world-state ($morph (:id props)))
+                         world-state) hand]
+         [{:type :click-right
+           :target-props props
+           :args {}}] [(if-let [mouse-click-right-cb (or (:click-right props) (:mouse-click props))]
+                         (mouse-click-right-cb world-state ($morph (:id props)))
+                         world-state) hand]
+         [{:type :click-left
+           :target-props props
+           :args {}}] [(if-let [mouse-click-right-cb (or (:click-left props) (:mouse-click props))]
+                         (mouse-click-right-cb world-state ($morph (:id props)))
+                         world-state) hand]
          :else :zero))
 
 ; GRABBING
@@ -134,7 +146,7 @@
          [:mouse-move focus-id] 
            (if (< 10 (eucl-distance pos new-pos))
              [world-state (partial dragging-in-progress pos focus-id 
-                                   (-> (fetch world-state ($morph focus-id)) meta :compiled-props :on-drag))]
+                                   (-> (fetch world-state [($morph focus-id)]) meta :compiled-props :on-drag))]
              [world-state (partial attempt-drag-from pos focus-id)])
          [:mouse-up-left _] 
              [world-state (either grabbing dragging)]
@@ -149,7 +161,7 @@
 
 ; INSPECTING
 
-(declare inspecting inspection-active add-observer observe)
+(declare inspecting inspection-active)
 
 (defn inspection-protected
   [focused-morph world-state 
@@ -213,45 +225,35 @@
                                {id :id inspectable? :inspectable? target :target} :target-props
                                args :args}]
   (match [evt-type inspectable?]
-         [:mouse-down-right true] [(morphic-read (-> world-state
-                                                   (halo id))) (partial inspection-active id)]
-         [:io _] [(do
-                    (redefine world-state ($morph target) (fn [_ _ _]
-                                                            (morphic-read (read-string (args :value))))))
+         [:mouse-down-right true] [(halo world-state id) (partial inspection-active id)]
+         [:io _] [(putback world-state [($morph target) description] (args :value))
                   (partial inspecting)]
          :else :zero))
 
 ; OBSERVING
 
-(defn observe [world-state observer observee observee-redefined observee-removed]
-  (-> world-state
-    (redefine ($morph observer) (fn [observer p s]
-                         (observer 
-                          (assoc p :observee-redefined observee-redefined
-                                   :observee-removed observee-removed)
-                          s)))
-    (redefine ($morph observee) (fn [observee p s]
-                         (observee 
-                          (assoc p :observers (set (conj (p :observers) observer)))
-                          s)))))
-
 (defn observing [world-state {evt-type :type 
-                              {observee :id observers :observers} :target-props
-                              changes :args}]
+                              {observee :id} :target-props
+                              {observers :observers} :args}]
   "Upon redefinition of a morph a redefinition signal is scheduled,
   which will be dispatched to all morphs that have :observing id of
   redefined morph. i.e. morph inspectors have to update definition"
   (match [evt-type]
          [:redefined] [(reduce (fn [world observer]
-                                 (let [[_ {redefined-cb :observee-redefined} _] (fetch world ($morph observer))]
+                                 (let [m (fetch world ($morph observer))
+                                       {redefined-cb :observee-redefined} (meta m)]
                                      (if redefined-cb
-                                       (redefined-cb world observer observee changes)
-                                       world))) world-state observers) observing] 
+                                       (redefined-cb world observer observee (fetch m changes))
+                                       world))) 
+                               world-state
+                               observers) observing] 
          [:removed] [(reduce (fn [world observer]
-                               (let [[_ {removed-cb :observee-redemoved} _] (fetch world ($morph observer))]
+                               (let [{removed-cb :observee-removed} (-> world (fetch ($morph observer)) meta)]
                                    (if removed-cb
                                      (removed-cb world observer observee)
-                                     world))) world-state observers) observing]
+                                     world))) 
+                             world-state
+                             observers) observing]
          :else :zero))
 
 (defmulti step (fn [lens world-state]
@@ -414,7 +416,7 @@
               :grabbable? true
               :inspectable? true
               :fps 1
-              :step '(fn [world self-ref]
+              :step (fn [world self-ref]
                        (let [{:keys [hours minutes seconds]} (get-current-time)
                              minutes (+ minutes (/ seconds 60))
                              hours (+ hours (/ minutes 60))]
@@ -427,10 +429,10 @@
               :border-color "darkgrey"
               :fill "-webkit-gradient(radial, 50% 50%, 0, 50% 50%, 250, from(rgb(255, 255, 255)), to(rgb(224, 224, 224)))"
               :drop-shadoe true}
-             (list 'create-labels radius) 
-             (list 'create-hour-pointer radius) 
-             (list 'create-minute-pointer radius) 
-             (list 'create-second-pointer radius))))
+             (create-labels radius) 
+             (create-hour-pointer radius) 
+             (create-minute-pointer radius) 
+             (create-second-pointer radius))))
 
 (def custom-morphs
   [(-> (rectangle 
@@ -440,20 +442,20 @@
          :fill "red"
          :inspectable? true
          :id "test3"}
-        (-> (ellipse 
+        (ellipse 
              {:position {:x 50 :y 50}
               :extent {:x 100 :y 100}
               :grabbable? true
               :inspectable? true
               :fill "green"
-              :id "eli"}))))
+              :id "eli"})))
    (image {:url "http://www.daniellaondesign.com/uploads/7/3/9/7/7397659/464698_orig.jpg"
            :extent {:x 300 :y 500}
            :position {:x 50 :y 50}
            :grabbable? true
            :inspectable? true
            :id "kyoto"})
-   '(let [{:keys [hours minutes seconds]} (get-current-time)
+   (let [{:keys [hours minutes seconds]} (get-current-time)
                              minutes (+ minutes (/ seconds 60))
                              hours (+ hours (/ minutes 60))]
       (-> (create-clock {:x 300 :y 300} {:x 300 :y 300}) 
@@ -478,4 +480,9 @@
 
 (def view (evolve my-world lively (async/merge [signals redefinitions])))
 
-(go-loop [] (rerender (<! view)) (recur))
+(go
+ (<! (init-compiler macro-info (fn [c] (prn "INIT RES" c))))
+ (go-loop [] (rerender (<! view)) (recur))
+ (pprint (meta (fetch (morph-eval '(ellipse {:id 42} (map (fn [x] (rectangle {:id x :fn (fn [x] 42)})) (range 3)))) [submorphs 0 submorphs 0])))
+ (pprint (meta (fetch (ellipse {:id 42} (map (fn [x] (rectangle {:id x :fn (fn [x] 42)})) (range 3))) [submorphs 0 submorphs 0])))
+ (run-tests 'cljs-morphic.test))

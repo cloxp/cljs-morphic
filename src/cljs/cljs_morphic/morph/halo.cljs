@@ -1,7 +1,8 @@
 (ns cljs-morphic.morph.halo
-  (:require [cljs-morphic.morph :refer [rectangle image ellipse find-morph
+  (:require-macros [cljs-morphic.macros :refer [rectangle image ellipse morph-fn ]])
+  (:require [cljs-morphic.morph :refer [find-morph
                                         set-prop position-in-world $morph redefine properties]]
-            [cljs-morphic.helper :refer-macros [morph-fn] :refer [add-points]]
+            [cljs-morphic.helper :refer [add-points]]
             [fresnel.lenses :refer [fetch]]))
 
 (declare resize-button inspect-button close-button)
@@ -37,7 +38,7 @@
                           :position (add-points (props :extent) {:x 0 :y 0})
                           :draggable? true
                           :target-id target-id
-                          :on-drag '(fn [world id {dx :x dy :y}]
+                          :on-drag (fn [world id {dx :x dy :y}]
                                      (-> world
                                        (redefine ($morph (fetch world [($morph id) properties :target-id])) 
                                                    (fn [self props submorphs]

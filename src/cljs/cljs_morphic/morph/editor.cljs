@@ -1,7 +1,7 @@
 (ns cljs-morphic.morph.editor
-  (:require-macros [cljs.core.async.macros :refer [go go-loop]])
-  (:require [cljs-morphic.morph :refer [io]]
-            [cljs-morphic.helper :refer-macros [morph-fn]]
+  (:require-macros [cljs.core.async.macros :refer [go go-loop]]
+                   [cljs-morphic.macros :refer [morph-fn io]])
+  (:require [cljs-morphic.morph]
             [cljs.core.async :as async :refer [>! <! put! chan timeout onto-chan]]
             [om.dom :as dom :include-macros true]))
 
