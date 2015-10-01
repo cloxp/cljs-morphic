@@ -1,7 +1,7 @@
 (ns cljs-morphic.morph.window
   (:require-macros [cljs-morphic.macros :refer [rectangle image ellipse text morph-fn]])
   (:require [cljs-morphic.morph :refer [set-prop position-in-world redefine 
-                                        $morph properties submorphs without unsubscribe]]
+                                        $morph properties submorphs without unsubscribe =>]]
             [fresnel.lenses :refer [fetch dissoc-trigger putback]]
             [cljs-morphic.helper :refer [add-points even-out]]))
 
@@ -107,10 +107,11 @@
                               :css {"cursor" "nwse-resize"}
                               :on-drag (fn [world id]
                                          (let [[_ {pos :position win :window-id target :target-id} _] (fetch world ($morph id))
-                                               new-extent (add-points pos {:x 25 :y 25})]
-                                           (-> world
-                                             (set-prop win :extent new-extent)
-                                             (set-prop target :extent (add-points {:x 0 :y -30} new-extent)))))}))))
+                                               new-extent (add-points pos {:x 25 :y 25})
+                                               layout (=> world target :layout)]
+                                           (cond-> world
+                                             true (set-prop win :extent new-extent)
+                                             layout (layout {:extent (add-points {:x 0 :y -30} new-extent)}))))}))))
 
 (morph-fn window [self props submorphs]
           (let [window-ext (add-points {:x 0 :y 30} (props :extent))

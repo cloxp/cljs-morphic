@@ -111,6 +111,11 @@
        :css {"-webkit-clip-path" "inset(-10px 0px 0px 3px round 10px 10px)"}
        :draggable? true
        :inspectable? true
+       :layout (fn [world new-props]
+                 (redefine world ($morph name) 
+                           (fn [editor props submorphs]
+                             (.resize (.edit js/ace name) true)
+                             (editor (merge props new-props) submorphs))))
        :mouse-move (fn [world self cursor-pos client-pos]
                      (if-let [token (get-numeric-token-at (.edit js/ace name) client-pos)]
                        (=> world self :css-class "Morph scrubbing")
