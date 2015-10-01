@@ -46,7 +46,7 @@
 (defmethod tree-make-node :hash-map [m children]
   (apply hash-map children))
 (defmethod tree-make-node :list [_ children]
-  children)
+  (apply list children))
 
 (defn tree-zipper [node]
   (z/zipper tree-branch? tree-children tree-make-node node))

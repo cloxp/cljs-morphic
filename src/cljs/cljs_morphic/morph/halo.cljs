@@ -1,6 +1,6 @@
 (ns cljs-morphic.morph.halo
   (:require-macros [cljs-morphic.macros :refer [rectangle image ellipse morph-fn ]])
-  (:require [cljs-morphic.morph :refer [find-morph
+  (:require [cljs-morphic.morph :refer [
                                         set-prop position-in-world $morph redefine properties]]
             [cljs-morphic.helper :refer [add-points]]
             [fresnel.lenses :refer [fetch]]))

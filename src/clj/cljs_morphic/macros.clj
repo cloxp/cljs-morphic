@@ -62,6 +62,7 @@
         instrumented-fn (-> tfmed last :z clojure.zip/node)]
     `(with-meta ~(apply list 'map instrumented-fn rest-expr)
       {:description ~(list 'quote map-expr)
+       :init-description ~(list 'quote map-expr)
         :expanded-expression? true
         :changes {}})))
 
@@ -69,6 +70,7 @@
   [expr]
   `(with-meta ~expr
        {:description ~(list 'quote expr)
+        :init-description ~(list 'quote expr)
         :morph? (morph? ~expr)
         :compiled-props (when (morph? ~expr) (-> ~expr meta :compiled-props))
         :expanded-expression? true
@@ -84,11 +86,12 @@
               'cljs-morphic.helper/text* 'text})
 
 (defn init-morph [self props submorphs]
-  (let [uncompiled-props (->> props
-                           (filter #(when 
-                                      (seq? (val %)) 
-                                      (-> % val first (= 'fn))))
-                           keys)
+  (let [uncompiled-props (when (map? props) 
+                           (->> props
+                             (filter #(when 
+                                        (seq? (val %)) 
+                                        (-> % val first (= 'fn))))
+                             keys))
         ; defer evaluation of the uncompiled props
         deferred-props (reduce (fn [props prop-name]
                             (update props prop-name #(list 'quote %))) 
