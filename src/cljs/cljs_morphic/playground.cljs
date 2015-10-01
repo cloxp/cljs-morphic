@@ -6,9 +6,9 @@
                                         without $morph it submorphs ast-type
                                         world-state set-prop add-morphs-to
                                         evolve redefinitions default-meta
-                                        description properties observe add-morph]]
+                                        description properties observe add-morph =>]]
             [fresnel.lenses :refer [fetch putback]]
-            [cljs-morphic.morph.editor :refer [ace-editor set-editor-value]]
+            [cljs-morphic.morph.editor :refer [ace-editor set-editor-value loop-mapping-button]]
             [cljs-morphic.morph.window :refer [window]]
             [cljs-morphic.morph.halo :refer [halo]]
             [cljs-morphic.event :refer [signals]]
@@ -40,9 +40,17 @@
 
 (defn hand [world-state signal-value]
   (match [signal-value]
-         [{:type :mouse-move  
-           :args {:pos pos}}] [(-> world-state
-                                 (set-prop "handMorph" :position pos)) 
+         [{:type :mouse-move
+           :target-props props 
+           :args {:pos pos
+                  :client-pos client-pos}}] [(let [world-state (-> world-state
+                                                   (set-prop "handMorph" :position 
+                                                             (add-points pos {:x 8 :y 8})))
+                                     mouse-move-cb (:mouse-move props)]
+                                 (if mouse-move-cb
+                                   (mouse-move-cb world-state ($morph (:id props))
+                                                  pos client-pos)
+                                   world-state))
                                hand]
          [{:type :mouse-enter
            :target-props props
@@ -55,6 +63,17 @@
            :args {}}] [(if-let [mouse-leave-cb (:mouse-leave props)]
                          (mouse-leave-cb world-state ($morph (:id props)))
                          world-state) hand]
+         [{:type :mouse-down-left
+           :target-props props
+           :args {:pos pos
+                  :client-pos client-pos}}] [(if-let [mouse-down-left-cb (:mouse-down-left props)]
+                         (mouse-down-left-cb world-state ($morph (:id props)) pos client-pos)
+                         world-state) hand]
+         [{:type :mouse-up-left
+           :target-props props
+           :args {}}] [(if-let [mouse-up-left-cb (:mouse-up-left props)]
+                         (mouse-up-left-cb world-state ($morph (:id props)))
+                         world-state) hand]
          [{:type :click-right
            :target-props props
            :args {}}] [(if-let [mouse-click-right-cb (or (:click-right props) (:mouse-click props))]
@@ -62,8 +81,8 @@
                          world-state) hand]
          [{:type :click-left
            :target-props props
-           :args {}}] [(if-let [mouse-click-right-cb (or (:click-left props) (:mouse-click props))]
-                         (mouse-click-right-cb world-state ($morph (:id props)))
+           :args {}}] [(if-let [mouse-click-left-cb (or (:click-left props) (:mouse-click props))]
+                         (mouse-click-left-cb world-state ($morph (:id props)))
                          world-state) hand]
          :else :zero))
 
@@ -180,10 +199,12 @@
                       (observe editor-id
                                target-morph
                                (fn [world editor inspected-morph _]
-                                 (-> world
-                                   (redefine ($morph editor) (fn [e p s]
-                                                               (set-editor-value 
-                                                                (e p s) (fetch world [($morph inspected-morph) description]))))))
+                                 (let [expr (fetch world [($morph inspected-morph) description])]
+                                   (cond-> world
+                                     true (redefine ($morph editor) (fn [e p s]
+                                                                      (set-editor-value (e p s) expr)))
+                                     ;(=> world editor :mapping-active) (putback [($morph inspected-morph) description] expr)
+                                     )))
                                (fn [world editor inspected-morph]
                                  (-> world
                                    (redefine ($morph editor) (fn [e p s]
@@ -483,6 +504,4 @@
 (go
  (<! (init-compiler macro-info (fn [c] (prn "INIT RES" c))))
  (go-loop [] (rerender (<! view)) (recur))
- (pprint (meta (fetch (morph-eval '(ellipse {:id 42} (map (fn [x] (rectangle {:id x :fn (fn [x] 42)})) (range 3)))) [submorphs 0 submorphs 0])))
- (pprint (meta (fetch (ellipse {:id 42} (map (fn [x] (rectangle {:id x :fn (fn [x] 42)})) (range 3))) [submorphs 0 submorphs 0])))
  (run-tests 'cljs-morphic.test))
