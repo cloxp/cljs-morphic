@@ -42,18 +42,20 @@
 
 (declare add-morph add-morph-before without set-prop)
 
-(def LOOP_MAPPING true)
-
-(defmulti changes->form (fn [expr changes opts] 
-                          (if LOOP_MAPPING 
-                            (first expr)
-                            :default)))
+(defn bi-lens? [x]
+  (and (satisfies? IFetch x) (satisfies? IPutback x)))
 
 ; unpack the previously added changes (BUG: what if expression originally comes with a '-> ?)
 
-(defmethod changes->form '-> 
-  ([[_ expr _] changes opts]
-   (changes->form expr changes opts)))
+(defmulti changes->form* (fn [expr changes opts] 
+                          (if (:loop-mapping opts) 
+                            (first expr)
+                            :default)))
+
+(defn changes->form 
+  ([expr changes opts]
+   (let [expr (if (= '-> (first expr)) (second expr) expr)]
+     (changes->form* expr changes opts))))
 
 (defn modify-prototype [prototype-expr unbound-changes]
   (let [[self props & submorphs] prototype-expr]
@@ -61,7 +63,7 @@
       (merge props unbound-changes)
       submorphs)))
 
-(defmethod changes->form 'map
+(defmethod changes->form* 'map
   ([map-expr {struct-changes :structure
               id->prop-changes :properties} {expr-morphs :expanded-expression}] 
    (let [[_ map-fn & rest-expr] map-expr
@@ -103,10 +105,10 @@
              (apply concat struct-changes
                (for [[morph prop-changes] id->prop-changes]
                  (apply concat (for [[prop value] prop-changes]
-                                 (list 'set-prop morph prop value))))))
+                                 (list '=> morph prop value))))))
        map-expr))))
 
-(defmethod changes->form 'for
+(defmethod changes->form* 'for
   ([for-expr {struct-changes :structurep
               id->prop-changes :properties} {loc :idx
                                              bound-props :bound-props}]
@@ -185,27 +187,30 @@
 
 ; default expression change preserving
 
-(defmethod changes->form :default 
+(defmethod changes->form* :default 
   ([expr {struct-changes :structure
           id->prop-changes :properties} _]
-   (apply list '-> expr
-     (concat struct-changes
-             (for [[morph prop-changes] id->prop-changes]
-               (apply concat (for [[prop value] prop-changes]
-                               (list 'set-prop morph prop value))))))))
+   (if (or (not-empty struct-changes) (-> id->prop-changes empty? not))
+     (apply list '-> expr
+       (apply concat struct-changes
+         (for [[morph prop-changes] id->prop-changes]
+           (concat (for [[prop value] prop-changes]
+                     (list '=> morph prop value))))))
+     expr)))
 
 (defmulti apply-changes 
   "Applies the changes to the expression and also updates the change meta-data accordingly"
   (fn [expr changes] (ast-type expr)))
 
 (defmethod apply-changes :morph [morph changes]
-  (morph-eval (changes->form (-> morph meta :description) changes)))
+  (morph-eval (changes->form (-> morph meta :description) changes {})))
 
 (defmethod apply-changes :expr [expr changes]
   (let [new-description (changes->form (-> expr meta :description) changes {:expanded-expression expr})
         new-expansion (morph-eval new-description)]
     (vary-meta new-expansion merge
       {:expanded-expression? true
+       :init-description (expr meta :init-description)
        :description new-description})))
 
 ; SUBMORPH LENS
@@ -233,8 +238,7 @@
                                 (changes->form 
                                   (-> expr meta :description) 
                                   (fetch expr changes) 
-                                  {:expanded-expression new-expansion}))
-                     ))))
+                                  {:expanded-expression new-expansion}))))))
 
 ; this will never happen, since (fetch [ vector ] [submorphs idx] == [idx])
 (defmethod putback-submorphs :vector [morphs new-submorphs]
@@ -281,16 +285,25 @@
 
 ; DESCRIPTION LENS
 
+(defn merge-meta-data [old-expr new-expr]
+  (putback (vary-meta new-expr #(merge (meta old-expr) %)) submorphs 
+           (map merge-meta-data
+                (concat (fetch old-expr submorphs) (iterate identity {})) 
+                (fetch new-expr submorphs))))
+
 (deflens description [expr new-description]
   :fetch 
   (with-out-str 
     (-> expr meta :description pprint))  
   :putback
-  (let [new-expr (if (string? new-description) (morph-eval-str (str "'" new-description)) new-description)] 
+  (let [new-expr (if (string? new-description) 
+                   (morph-eval-str (str "'" new-description)) 
+                   new-description)] 
     (if (morph? new-expr)
-      (vary-meta (morph-eval new-expr) #(merge (meta expr) %))
+      (merge-meta-data expr (morph-eval new-expr))
       (vary-meta (morph-eval new-expr) merge {:expanded-expression? true
                                               :description new-expr
+                                              :init-description new-expr
                                               :changes {}})))) 
 
 ; CHANGES LENS
