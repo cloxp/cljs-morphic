@@ -7,26 +7,32 @@
 (defn get-cursor-pos [e]
   {:x (.-pageX e) :y (.-pageY e)})
 
+(defn get-client-pos [e]
+  {:x (.-clientX e) :y (.-clientY e)})
+
 (defn extract-mouse-down-handler [props]
   (fn [e]
     (.preventDefault e)
-    (let [pos (get-cursor-pos e)
-          morph-id (props :id)
-          right? (.-altKey e)]
+    (let [morph-id (props :id)
+          right? (.-altKey e)
+          args {:pos (get-cursor-pos e)
+                :client-pos (get-client-pos e)}]
       (go
        (if right?
-        (>! signals {:type :mouse-down-right :target-props props :args {:pos pos}})
-        (>! signals {:type :mouse-down-left :target-props props :args {:pos pos}}))))))
+        (>! signals {:type :mouse-down-right :target-props props :args args})
+        (>! signals {:type :mouse-down-left :target-props props :args args}))))))
 
 (defn extract-mouse-up-handler [props]
   (fn [e]
     (.preventDefault e)
     (let [pos (get-cursor-pos e)
-          right? (.-altKey e)]
+          right? (.-altKey e)
+          args {:pos (get-cursor-pos e)
+                :client-pos (get-client-pos e)}]
       (go
        (if right?
-        (>! signals {:type :mouse-up-right :target-props props :args {:pos pos}})
-        (>! signals {:type :mouse-up-left :target-props props :args {:pos pos}}))))))
+        (>! signals {:type :mouse-up-right :target-props props :args args})
+        (>! signals {:type :mouse-up-left :target-props props :args args}))))))
 
 (defn extract-double-click-handler [props]
   (fn [e]
@@ -38,12 +44,13 @@
 (defn extract-click-handler [props]
   (fn [e]
     (.preventDefault e)
-    (let [pos (get-cursor-pos e)
-          right-click? (.-altKey e)]
+    (let [right-click? (.-altKey e)
+          args {:pos (get-cursor-pos e)
+                :client-pos (get-client-pos e)}]
       (go
        (if right-click?
-        (>! signals {:type :click-right :target-props props :args {:pos pos}})
-        (>! signals {:type :click-left :target-props props :args {:pos pos}}))))))
+         (>! signals {:type :click-right :target-props props :args args})
+         (>! signals {:type :click-left :target-props props :args args}))))))
 
 (defn extract-mouse-enter-handler [props]
   (fn [e]
@@ -72,9 +79,12 @@
 (defn extract-mouse-move-handler [props]
   (fn [e]
     (.preventDefault e)
-    (let [pos (get-cursor-pos e)]
+    (let [pos (get-cursor-pos e)
+          client-pos (get-client-pos e)]
       (go
-       (>! signals {:type :mouse-move :target-props props :args {:pos pos}})))))
+       (>! signals {:type :mouse-move :target-props props 
+                    :args {:pos pos
+                           :client-pos client-pos}})))))
 
 (defn extract-mouse-scroll-handler [morph]
   ; mouseScroll
