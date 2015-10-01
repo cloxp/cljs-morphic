@@ -126,7 +126,7 @@
   (cond
     (expanded-expression? x) :expr
     (morph? x) :morph
-    (vector? x) :vector
+    (morph-list? x) :vector
     :else (throw (str "Encountered non morphic structure in hierarchy " x))))
 
 (deflens it [x y] ; maybe 'self' is a better name than 'it'
@@ -638,8 +638,12 @@
 ; this is just boilerplate code to transform the react events
 ; into FRP signals that can be used in a functional manner
 
+(defn extract-morph-class [props]
+  (or (:css-class props) "Morph"))
+
 (defn extract-html-attributes [props]
   #js {:style (extract-morph-css props)
+       :className (extract-morph-class props)
        :onClick (event/extract-click-handler props)
        :onDoubleClick (event/extract-double-click-handler props)
        :onMouseEnter (event/extract-mouse-enter-handler props)
@@ -839,9 +843,10 @@
         om/IRender
         (render [self]
                 ; morph
-                (dom/div (extract-html-attributes props)
+                (apply dom/div (extract-html-attributes props)
                   (dom/div (clj->js {:style (extract-morph-shape-css props)})
-                    ((props :html) props))))))
+                    ((props :html) props))
+                  (map render submorphs)))))
 
 (defn render-root [morph _]
   (reify
