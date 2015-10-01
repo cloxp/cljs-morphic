@@ -1,7 +1,7 @@
 (ns cljs-morphic.morph
   (:require-macros [cljs.analyzer.macros :refer [no-warn]]
                    [cljs.core.async.macros :refer [go go-loop]]
-                   [fresnel.lenses :refer [deflens]]
+                   [fresnel.lenses :refer [deflens deffetch]]
                    [cljs-morphic.macros :refer [morph-fn rectangle ellipse image text polygon]])
   (:require [cljs-morphic.evaluator :refer [morph-eval morph-eval-str]]
             [cljs-morphic.event :as event :refer [signals]]
@@ -23,7 +23,7 @@
 
             [om.core :as om :include-macros true]
             [om.dom :as dom :include-macros true]
-            [fresnel.lenses :refer [fetch putback create-lens create-lens dissoc-trigger]])
+            [fresnel.lenses :refer [fetch putback create-lens create-lens dissoc-trigger IFetch IPutback]])
   (:import [goog.net XhrIo]
            [goog.events EventType]))
 
@@ -38,7 +38,7 @@
 
 (declare without)
 
-(declare rerender redefine on-drag find-morph)
+(declare rerender redefine on-drag)
 
 (declare add-morph add-morph-before without set-prop)
 
@@ -439,6 +439,22 @@
 (defn set-prop [world id prop-name prop-value]
   "Set the property prop-name of morph with id in world to prop-value"
   (putback world [($morph id) properties prop-name] prop-value))
+
+(defn => 
+  ([world id prop-name]
+   (cond
+     (fetch world id) (fetch world [id properties prop-name])
+     :default (fetch world [($morph id) properties prop-name])))
+  ([world id prop-name new-value]
+   (if (and (bi-lens? id) (fetch world id))
+     (let [v (fetch world [id properties prop-name])] 
+         (cond 
+         (fn? new-value) (putback world [id properties prop-name] (new-value v))
+                   :default (putback world [id properties prop-name] new-value)))
+     (let [v (fetch world [($morph id) properties prop-name])]
+       (cond 
+         (fn? new-value) (set-prop world id prop-name (new-value v))
+         :default (set-prop world id prop-name new-value))))))
 
 (defn add-morphs-to [world id morphs]
   "Add collection of morphs to the morph with id in world"
