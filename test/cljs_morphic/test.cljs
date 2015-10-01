@@ -5,7 +5,7 @@
             [cljs.pprint :refer [pprint write]]
             [cljs-morphic.morph :refer [redefine
                                         move-morph without set-prop add-morphs-to add-morph
-                                        submorphs properties description changes $morph it morph-lens]])
+                                        submorphs properties description optimization changes $morph it morph-lens =>]])
   (:require-macros [cljs.test :refer (is deftest run-tests testing)]
                    [cljs-morphic.macros :refer [rectangle ellipse image]]))
 
@@ -316,11 +316,11 @@
   
   (testing "Redefining the submorphs of an abstraction causes the abstraction to be redefined."
     (is (= (-> expression-world
-             (set-prop "miso" :position {:x 0 :y 0})
+             (=> "miso" :position {:x 0 :y 0})
              (fetch [($morph "c") submorphs 0 description]))
            (with-out-str 
              (pprint '(-> (japanese-kitchen {:x 42 :y 42})
-                        (set-prop "miso" :position {:x 0 :y 0}))))))
+                        (=> "miso" :position {:x 0 :y 0}))))))
     (is (= (-> expression-world 
              (add-morph "miso" (ellipse {:id "sakana" :fill "blue"}))
              (fetch [($morph "c") submorphs 0 description]))
@@ -328,13 +328,13 @@
              (pprint '(-> (japanese-kitchen {:x 42 :y 42})
               (add-morph "miso" (ellipse {:id "sakana" :fill "blue"})))))))
     (is (= (-> expression-world
-             (set-prop "miso" :position {:x 0 :y 0})
+             (=> "miso" :position {:x 0 :y 0})
              (add-morph "miso" (ellipse {:id "sakana" :fill "blue"}))
              (fetch [($morph "c") submorphs 0 description]))
            (with-out-str
              (pprint '(-> (japanese-kitchen {:x 42 :y 42})
                         (add-morph "miso" (ellipse {:id "sakana" :fill "blue"}))
-                        (set-prop "miso" :position {:x 0 :y 0}))))))
+                        (=> "miso" :position {:x 0 :y 0}))))))
     (is (= (-> expression-world 
              (without "miso")
              (fetch [($morph "c") submorphs 0]))
@@ -358,15 +358,16 @@
 (deftest test-loop-mapping
   (testing "Changing an unbound property of a looped morph, alters the prototype"
     (is (= (-> expression-world
+             (putback [($morph "b") submorphs 0 submorphs 1 properties :position] {:x 0 :y 0})
              (putback [($morph "b") submorphs 0 submorphs 1 properties :fill] "red")
-             (fetch description))
+             (fetch optimization))
            (with-out-str 
              (pprint '(rectangle {:id "world" :position {:x 0 :y 0}}
                                  (ellipse {:id "b" :position {:x 42 :y 42}}
                                           (map (fn [a b]
                                                  (ellipse {:id (str a b)
                                                            :extent {:x a :y b}
-                                                           :position {:x 10 :y 42}
+                                                           :position {:x 0 :y 0}
                                                            :fill "red"})) (range 3) (range 3))
                                           (ellipse {:id "tea" :fill "black"})
                                           (ellipse {:id "milk" :fill "white"}))
@@ -389,7 +390,7 @@
                                                      (ellipse {:id (str a b)
                                                                :extent {:x a :y b}
                                                                :position {:x 10 :y 42}})) (range 3) (range 3))
-                                            (set-prop "11" :extent {:x 42 :y 42}))
+                                            (=> "11" :extent {:x 42 :y 42}))
                                           (ellipse {:id "tea" :fill "black"})
                                           (ellipse {:id "milk" :fill "white"}))
                                  (image {:id "c" :position {:x 100 :y 100}}
