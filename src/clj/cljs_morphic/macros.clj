@@ -19,12 +19,16 @@
        (~(into [] (concat [morph] (drop 3 args)))
          (if (vector? ~morph)  ;morph is already destructured by previous fn call
           (apply ~fn-name (conj ~morph ~@(drop 3 args)))
-           (let [[m# p# & s#] ~morph]
-             (apply ~fn-name 
-               (applicative ~morph) 
-               p# 
-               s#
-               ~@(drop 3 args)())))
+           (let [m# (first ~morph)
+                 p# (second ~morph)
+                 s# (drop 2 ~morph)]
+             (vary-meta 
+              (apply ~fn-name 
+                (applicative ~morph) 
+                p# 
+                s#
+                ~@(drop 3 args)())
+              assoc :break-abstraction? true)))
          ) 
        (~args
          ~@body))))
@@ -32,7 +36,8 @@
 (defmulti read-morph (fn [expr]
                        (cond
                          (morph? expr) :morph
-                         (or (= `map (first expr)) (= 'map (first expr))) :map
+                         (= `map (first expr)) :map
+                         (= 'for (first expr)) :expr ; :for
                          :default :expr)))
 
 (defmethod read-morph :morph 

@@ -222,8 +222,10 @@
                     (go (>! redefinitions {:type :redefined :target-props props}))
                     (let [new-submorphs (remove nil? new-submorphs)]
                       (vary-meta (self props new-submorphs)
-                                 update :description (fn [[self props _]]
-                                                       (apply list self props (map #(-> % meta :description) new-submorphs))))))))
+                                 update :description (fn [m]
+                                                       (let [self (first m)
+                                                             props (second m)]
+                                                         (apply list self props (map #(-> % meta :description) new-submorphs)))))))))
 
 
 (defmethod putback-submorphs :expr [expr new-submorphs]

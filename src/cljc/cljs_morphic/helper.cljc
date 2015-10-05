@@ -187,7 +187,9 @@
   "Transforms the edn representing a morph into
   and applicative function."
   (fn [new-props & new-submorphs]
-    (let [[self old-props & old-submorphs] morph
+    (let [self (first morph)
+          old-props (second morph)
+          old-submorphs (drop 2 morph)
           old-changes (assoc (-> morph meta :changes) :recompile? false)
           structure-changes (diff-submorphs (old-props :id) 
                                   new-submorphs 
@@ -205,7 +207,9 @@
 (defn apply-to-morph [function m]
   "Transforms the morph into an applicable and then applies
    function to the applicable morph together with its props and submorphs."
-  (let [[morph props & submorphs] m]
+  (let [morph (first m)
+        props (second m)
+        submorphs (drop 2 m)]
     (function (applicative m) 
                          props 
                          submorphs)))
