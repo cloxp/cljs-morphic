@@ -1,6 +1,6 @@
 (ns cljs-morphic.playground
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]
-                   [cljs-morphic.macros :refer [morph-fn ellipse rectangle image io polygon text]])
+                   [cljs-morphic.macros :refer [morph-fn ellipse rectangle image io polygon text defmorph]])
   (:require [cljs-morphic.evaluator :refer [macro-info morph-eval morph-eval-str init-compiler]]
             [cljs-morphic.morph :refer [rerender redefine move-morph morph-under-me changes
                                         without $morph it submorphs ast-type
