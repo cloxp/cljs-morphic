@@ -6,9 +6,12 @@
                                         without $morph it submorphs ast-type
                                         world-state set-prop add-morphs-to
                                         evolve redefinitions default-meta
-                                        description properties observe add-morph =>]]
+                                        description optimization properties observe add-morph => *silent*
+                                        source-map]]
             [fresnel.lenses :refer [fetch putback]]
-            [cljs-morphic.morph.editor :refer [ace-editor set-editor-value loop-mapping-button]]
+            [cljs-morphic.morph.editor :refer [ace-editor set-editor-value 
+                                               loop-mapping-button
+                                               morph-mapping-button focus-editor-on inspecting]]
             [cljs-morphic.morph.window :refer [window]]
             [cljs-morphic.morph.halo :refer [halo]]
             [cljs-morphic.event :refer [signals]]
@@ -102,9 +105,8 @@
                                    world-state) (partial grabbing-in-progress focus-id)]
          [:mouse-up-left _] [(-> world-state 
                                (move-morph focus-id (morph-under-me world-state focus-id))
-                               (redefine ($morph focus-id) (fn [self props submorphs]
-                                                             (self (dissoc props :drop-shadow) submorphs)))) 
-                                                           (either grabbing dragging)]
+                               (=> focus-id :drop-shadow false)) 
+                              (either grabbing dragging)]
          :else :zero))
 
 (defn attempt-grab-from [pos focus-id world-state 
@@ -176,79 +178,6 @@
                              {pos :pos} :args}]
   (match [evt-type draggable?]
          [:mouse-down-left true] [world-state (partial attempt-drag-from pos id)]
-         :else :zero))
-
-; INSPECTING
-
-(declare inspecting inspection-active)
-
-(defn inspection-protected
-  [focused-morph world-state 
-   {evt-type :type}]
-  (match [evt-type]
-         [:mouse-up-left] [world-state (partial inspection-active focused-morph)]
-         :else :zero))
-
-(defn part-of-halo? [world-state id]
-  (let [halo (fetch world-state ($morph "halo"))]
-    (not (nil? ($morph halo id)))))
-
-(defn focus-editor-on [world-state editor-id target-morph]
-  (let [world-state (-> world-state
-                      (set-prop editor-id :target target-morph)
-                      (observe editor-id
-                               target-morph
-                               (fn [world editor inspected-morph _]
-                                 (let [expr (fetch world [($morph inspected-morph) description])]
-                                   (cond-> world
-                                     true (redefine ($morph editor) (fn [e p s]
-                                                                      (set-editor-value (e p s) expr)))
-                                     ;(=> world editor :mapping-active) (putback [($morph inspected-morph) description] expr)
-                                     )))
-                               (fn [world editor inspected-morph]
-                                 (-> world
-                                   (redefine ($morph editor) (fn [e p s]
-                                                               (set-editor-value 
-                                                                (e p s) "Target Removed!")))))))]
-    (redefine world-state ($morph editor-id) 
-              (fn [e p s]
-                (set-editor-value 
-                 (e p s) (fetch world-state [($morph target-morph) description]))))))
-
-(defn inspection-active 
-  [focused-morph-id world-state 
-   {evt-type :type 
-    {id :id inspectable? :inspectable? target :target} :target-props
-    args :args}]
-  (match [evt-type inspectable? id]
-         [:mouse-down-right _ "halo"] [(-> world-state (without "halo")) inspecting]
-         [(:or :click-right :mouse-down-right) true _] [world-state (partial inspection-active focused-morph-id)]
-         [(:or :mouse-down-left) _ "infoButton"]
-         [(let [editor-id (str "editor-on-" focused-morph-id)
-                editor (window (ace-editor "" {:x 50 :y 50} {:x 400 :y 400} editor-id))]
-            (-> world-state
-              (add-morphs-to "world" editor)
-              (focus-editor-on editor-id focused-morph-id))) 
-          (partial inspection-protected focused-morph-id)]
-         [:io _ _] [world-state 
-                    (partial inspection-protected focused-morph-id)]
-         ; redefine the morph the editor is editing by compiling the new description and hot swapping it
-         [:mouse-down-left _ "closeButton"] [(-> world-state 
-                                               (without focused-morph-id)
-                                               (without "halo")) inspecting]
-         [(:or :click-left :mouse-down-left) _ _] ; mouse down left will cancel the inspection any time anywhere
-         (if (part-of-halo? world-state id) 
-           :zero 
-           [(-> world-state (without "halo")) inspecting])
-         :else :zero))
-
-(defn inspecting [world-state {evt-type :type 
-                               {id :id inspectable? :inspectable? target :target} :target-props
-                               args :args}]
-  (match [evt-type inspectable?]
-         [:mouse-down-right true] [(halo world-state id) (partial inspection-active id)]
-         [:io _] [(putback world-state [($morph target) description] (args :value))
-                  (partial inspecting)]
          :else :zero))
 
 ; OBSERVING
@@ -391,69 +320,79 @@
 (defn angle-for-hour [hour]
   (* (+ -0.25 (/ hour 12)) PI 2))
 
-(defn create-second-pointer [radius]
+(defn second-pointer [radius seconds]
   (rectangle 
    {:id "SecondPointer"
     :position {:x 0 :y -1.5}
     :fill "red"
+    :rotation (* (+ -0.25 (/ seconds 60)) 2 PI)
     :stroke-width 2
     :extent {:x (* 0.85 radius) :y 3}}))
 
-(defn create-minute-pointer [radius]
+(defn minute-pointer [radius minutes]
   (rectangle {:id "MinutePointer"
               :position {:x 0 :y -2}
               :fill "darkblue"
+              :rotation (* (+ -0.25 (/ minutes 60)) 2 PI)
               :stroke-width 2
               :extent {:x (* .7 radius) :y 4}}))
 
-(defn create-hour-pointer [radius]
+(defn hour-pointer [radius hours]
   (rectangle 
    {:id "HourPointer"
     :position {:x 0 :y -2.5}
+    :rotation (angle-for-hour hours)
     :fill "darkblue"
     :stroke-width 2
     :extent {:x (* .5 radius) :y 5}}))
 
-(defn create-hour-label [label pos]
+(defn hour-label [label pos size]
   (text
    {:id (str label "h")
     :position pos
     :text-string label
     :font-family "Arial"
     :allow-input false
-    :font-size 9
+    :font-size size
     :extent {:x 17 :y 17}}))
 
 (defn point-from-polar [radius angle]
   {:x (* radius (.cos js/Math angle)) :y (* radius (.sin js/Math angle))})
 
 (defn create-labels [radius]
-  (mapv #(create-hour-label % (point-from-polar (* radius .8) (angle-for-hour %))) (range 1 13)))
+  (mapv #(hour-label % (point-from-polar (* radius .8) (angle-for-hour %)) (/ radius 15)) (range 1 13)))
 
-(defn create-clock [bounds pos]
-  (let [radius (/ (bounds :x) 2)]
-    (ellipse {:id "Clock"
+(defmorph create-clock [name bounds pos time]
+  (let [radius (/ (bounds :x) 2)
+        {:keys [x y]} bounds
+        ext (if (> x y) {:x x :y x} {:x y :y y})
+        {:keys [hours minutes seconds]} time]
+    (ellipse {:id name
               :position pos
               :grabbable? true
               :inspectable? true
+              :layout 
+              (fn [world new-props]
+                (redefine world ($morph name) 
+                            (fn [self props submorphs]
+                              (create-clock name (:extent new-props) (:position new-props) (get-current-time)))))
               :fps 1
               :step (fn [world self-ref]
-                       (let [{:keys [hours minutes seconds]} (get-current-time)
-                             minutes (+ minutes (/ seconds 60))
-                             hours (+ hours (/ minutes 60))]
-                         (-> world 
-                           (set-prop "HourPointer" :rotation (angle-for-hour hours))
-                           (set-prop "MinutePointer" :rotation (* (+ -0.25 (/ minutes 60)) 2 PI))
-                           (set-prop "SecondPointer" :rotation (* (+ -0.25 (/ seconds 60)) 2 PI)))))
-              :extent bounds
+                      (redefine world self-ref
+                                (fn [_ props _]
+                                  (create-clock name 
+                                                (:extent props) 
+                                                (:position props) 
+                                                (get-current-time)))))
+              :extent ext
               :border-width 4
               :border-color "darkgrey"
               :fill "-webkit-gradient(radial, 50% 50%, 0, 50% 50%, 250, from(rgb(255, 255, 255)), to(rgb(224, 224, 224)))"
               :drop-shadoe true}
              (create-labels radius) 
-             (create-hour-pointer radius) 
-             (create-minute-pointer radius) 
-             (create-second-pointer radius))))
+             (hour-pointer radius hours) 
+             (minute-pointer radius minutes) 
+             (second-pointer radius seconds))))
 
 (def custom-morphs
   [(-> (rectangle 
@@ -475,24 +414,18 @@
            :position {:x 50 :y 50}
            :grabbable? true
            :inspectable? true
-           :id "kyoto"})
-   (let [{:keys [hours minutes seconds]} (get-current-time)
-                             minutes (+ minutes (/ seconds 60))
-                             hours (+ hours (/ minutes 60))]
-      (-> (create-clock {:x 300 :y 300} {:x 300 :y 300}) 
-                           (set-prop "HourPointer" :rotation (angle-for-hour hours))
-                           (set-prop "MinutePointer" :rotation (* (+ -0.25 (/ minutes 60)) 2 PI))
-                           (set-prop "SecondPointer" :rotation (* (+ -0.25 (/ seconds 60)) 2 PI))))
-   (-> (rectangle {:position {:x 50 :y 50} 
+           :id "kyoto"}
+          (create-clock "Clock" {:x 300 :y 300} {:x 300 :y 300} (get-current-time)))
+   (rectangle {:position {:x 50 :y 50} 
                    :id "test" 
                    :draggable? true
                    :extent {:x 100 :y 100} 
                    :fill "blue"
-                   :inspectable? true}))
-   (-> (rectangle {:position {:x 30 :y 30} 
+                   :inspectable? true})
+   (rectangle {:position {:x 30 :y 30} 
                    :id "test2" 
                    :grabbable? true
-                   :extent {:x 50 :y 50} :fill "yellow"}))])
+                   :extent {:x 50 :y 50} :fill "yellow"})])
 
 (def my-world (-> default-world-state
                 (add-morphs-to "world" custom-morphs)
