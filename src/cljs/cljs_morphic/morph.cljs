@@ -15,7 +15,7 @@
             [cljs.reader :refer [read-string]]
             [cljs.analyzer :as ana]
             [cljs.core.match :refer-macros [match]]
-            [clojure.string :refer [replace-first]]
+            [clojure.string :refer [replace-first split-lines]]
             [clojure.data :refer [diff]]
             [clojure.walk :refer [prewalk postwalk walk]]
             [clojure.zip :as z]
@@ -31,6 +31,8 @@
 
 ; WORLD FUNCTIONS
 ; global channel that all events that happen are dispatched through
+
+(def ^:dynamic *silent* false)
 
 (def redefinitions (chan))
 
@@ -54,7 +56,10 @@
 
 (defn changes->form 
   ([expr changes opts]
-   (let [expr (if (= '-> (first expr)) (second expr) expr)]
+   (let [expr (if (= '-> (first expr))
+                (or (-> expr meta :init-description)
+                    (second expr)) 
+                expr)]
      (changes->form* expr changes opts))))
 
 (defn modify-prototype [prototype-expr unbound-changes]
@@ -126,7 +131,7 @@
   (cond
     (expanded-expression? x) :expr
     (morph? x) :morph
-    (morph-list? x) :vector
+    (or (vector? x) (morph-list? x)) :vector
     :else (throw (str "Encountered non morphic structure in hierarchy " x))))
 
 (deflens it [x y] ; maybe 'self' is a better name than 'it'
@@ -136,9 +141,10 @@
              :else y))
 
 (defn redefinition-notify [expr]
-  (go (>! redefinitions {:type :redefined 
-                         :target-props (fetch expr properties)
-                         :args {:observers (-> expr meta :observers)}})))
+  (when-not *silent* 
+    (go (>! redefinitions {:type :redefined 
+                           :target-props (fetch expr properties)
+                           :args {:observers (-> expr meta :observers)}}))))
 
 (defn redefine
   ([expression redefinition]
@@ -147,32 +153,12 @@
    (let [expr (fetch world-state lens)]
      (let [new-morph (apply-to-morph redefinition expr)
            new-morph (cond 
-                       (expanded-expression? new-morph)
+                       (or (expanded-expression? new-morph)
+                           (morph-list? new-morph)
+                           (morph? new-morph))
                        (do
-                         (redefinition-notify expr)
-                         (vary-meta new-morph 
-                                    assoc 
-                                    :description (changes->form
-                                                   (-> new-morph meta :description)
-                                                   (fetch new-morph changes)
-                                                   {:expanded-expression new-morph})))
-
-                       (morph-list? new-morph)
-                       (do 
                          (redefinition-notify expr)
                          new-morph)
-                       
-                       (morph? new-morph)
-                       (do
-                         (redefinition-notify expr)
-                         (vary-meta new-morph update 
-                                    :description 
-                                    (fn [[self props & submorphs]]
-                                      (apply list
-                                        self
-                                        (second new-morph)
-                                        submorphs)))) 
-                       
                        (nil? new-morph) (do
                                           (go (>! redefinitions {:type :redefined 
                                                                  :target-props (fetch expr properties)
@@ -236,11 +222,19 @@
                                          (with-meta (remove nil? new-submorphs) (meta expr))
                                          ; meta is already preserved
                                          (self props (remove nil? new-submorphs)))]
-                     (vary-meta new-expansion assoc :description 
-                                (changes->form 
-                                  (-> expr meta :description) 
-                                  (fetch expr changes) 
-                                  {:expanded-expression new-expansion}))))))
+                     (-> new-expansion 
+                       (vary-meta assoc 
+                                  :description 
+                                  (changes->form 
+                                    (-> expr meta :description) 
+                                    (fetch expr changes) 
+                                    {:expanded-expression new-expansion}))
+                       (vary-meta update
+                                  :morph-description
+                                  (fn [m]
+                                    (let [self (first m)
+                                          props (second m)]
+                                      (apply list self props (map #(-> % meta :description) new-submorphs))))))))))
 
 ; this will never happen, since (fetch [ vector ] [submorphs idx] == [idx])
 (defmethod putback-submorphs :vector [morphs new-submorphs]
@@ -293,20 +287,123 @@
                 (concat (fetch old-expr submorphs) (iterate identity {})) 
                 (fetch new-expr submorphs))))
 
+(defn get-total-expr-len 
+  [source-map]
+  (let [offset (-> source-map meta :offset)
+        children (when (morph? source-map) 
+                   (fetch source-map submorphs))]
+    (if children
+      (apply + 1 offset (map get-total-expr-len children))
+      offset)))
+
+(defn idx->range&ref 
+  ([idx source-map]
+   (idx->range&ref idx source-map [it] 0))
+  ([idx source-map ref start]
+   (let [offset (+ start (dec (-> source-map meta :offset)))
+         children (when (morph? source-map) 
+                    (fetch source-map submorphs))]
+     (when (< start idx)
+      (or (loop [i 0
+                 s children
+                 o offset]
+            (if (empty? s)
+              (when (< idx o) 
+                {:range [start o]
+                 :ref (apply vector ref)})
+              (or (idx->range&ref idx (first s) (concat ref [submorphs i]) (dec o))
+                  (recur (inc i) (rest s) (+ o (get-total-expr-len (first s))))))))))))
+
+(defn expr-str-len [desc indent] 
+  (->> 
+    desc
+    split-lines
+    (reduce (fn [len l2]
+              (let [c (count l2)]
+                (if (> c 0) 
+                  (+ 1 len indent c)
+                  len))) 0)))
+
+(declare description*)
+
+(defn description-for-morph* [m-expr indent] 
+  (let [md (or (-> m-expr meta :morph-description) (-> m-expr meta :description)) 
+        self (first md)
+        props (second m-expr)
+        desc (with-out-str 
+               (pprint (list self props)))
+        l    (dec (expr-str-len desc indent))]
+    (with-meta (apply list self props (map #(description* % (inc indent)) 
+                                           (fetch m-expr submorphs))) 
+      {:offset l
+       :abstraction-hidden? (-> m-expr meta :hide-abstraction?)
+       :abstraction? (contains? (-> m-expr meta) :morph-description)})))
+
+(defn description* [expr indent]
+  (cond
+    (expanded-expression? expr)
+    (cond
+      (-> expr meta :hide-abstraction?) 
+      (description-for-morph* expr indent)
+      :default
+      (let [expr (changes->form 
+                   (-> expr meta :description) 
+                   (fetch expr changes)
+                   {:expanded-expression expr})
+            l (expr-str-len (with-out-str (pprint expr)) indent)]
+        (with-meta expr {:offset l})))
+    (morph? expr)
+    (description-for-morph* expr indent)))
+
+(deflens source-map [expr _]
+  :fetch 
+  (description* expr 0)
+  :putback
+  expr)
+
 (deflens description [expr new-description]
   :fetch 
-  (with-out-str 
-    (-> expr meta :description pprint))  
+  (let [desc (description* expr 0)]
+    (with-out-str 
+                    (pprint desc)))  
   :putback
   (let [new-expr (if (string? new-description) 
-                   (morph-eval-str (str "'" new-description)) 
+                   (morph-eval (read-string (str "'" new-description))) 
                    new-description)] 
     (if (morph? new-expr)
       (merge-meta-data expr (morph-eval new-expr))
       (vary-meta (morph-eval new-expr) merge {:expanded-expression? true
                                               :description new-expr
                                               :init-description new-expr
-                                              :changes {}})))) 
+                                              :changes {}}))))
+
+(defn optimization* [expr]
+  "Works only on expanded expressions: This needs to traverse the whole morph hierarchy... TODO:"
+  (cond
+    (expanded-expression? expr)
+    (cond
+      (-> expr meta :break-abstraction?) 
+      (changes->form
+                 (-> expr meta :morph-description)
+                 (fetch expr changes)
+                 {})
+      :default
+      (changes->form
+                 (-> expr meta :init-description)
+                 (fetch expr changes)
+                 {:expanded-expression expr
+                  :loop-mapping true}))
+    (morph? expr)
+    (let [d (-> expr meta :description)
+          self (first d)
+          props (second d)]
+      (apply list self props (map optimization* (fetch expr submorphs))))))
+
+(deflens optimization [expr _]
+  :fetch
+  (optimization* expr)
+  :putback
+  expr)
 
 ; CHANGES LENS
 
@@ -396,8 +493,11 @@
            :default nil)))
 
 (defn position-in-world 
-  ([world-state id]
-   (position-in-world world-state ($morph world-state id) {:x 0 :y 0}))
+  ([world-state ref]
+   (if-let [m (fetch world-state ref)]
+     ; this step is nessecary, because we need to flatten the lens, in order to count the steps
+     (position-in-world world-state ($morph world-state (fetch m [properties :id])) {:x 0 :y 0})
+     (position-in-world world-state ($morph world-state ref) {:x 0 :y 0})))
   ([parent lens-path pos]
    (if (empty? lens-path)
      pos
@@ -455,6 +555,12 @@
   "Set the property prop-name of morph with id in world to prop-value"
   (putback world [($morph id) properties prop-name] prop-value))
 
+(defn call=> [world id fn-name & args]
+  (apply (-> 
+           (cond
+             (fetch world id) (fetch world id)
+             :default (fetch world ($morph id))) meta :compiled-props fn-name) world args))
+
 (defn => 
   ([world id prop-name]
    (cond
@@ -498,7 +604,9 @@
 
 (defn without [world id]
   "Return a world without the morph with the given id."
-  (redefine world ($morph id) (fn [self props submorphs])))
+  (if ($morph world id)
+    (redefine world ($morph id) (fn [self props submorphs]))
+    world))
 
 (defn unsubscribe [world-state observer]
   (let
@@ -773,19 +881,18 @@
     (render [self]
             (dom/div (extract-html-attributes props)
               (let [offset (props :extent)
-                    x-offset (str (/ (:y offset) 2) "px !important")
-                    y-offset (str (/ (:x offset) 2) "px !important")
+                    x-offset (str (/ (:y offset) 2) "px")
+                    y-offset (str (/ (:x offset) 2) "px")
                     style (extract-morph-shape-css props)]
                 ; shape
                 (dom/div 
                   #js {:style (dict->js (assoc style "borderRadius" 
-                                               (str (-> props :extent :x) "px /" (-> props :extent :y) "px"))) } 
-                  (apply dom/div #js {:className "originNode"
-                                      :style #js {:position "absolute",
-                                                  :top y-offset,
-                                                  :left x-offset,
-                                                  :marginTop "-2px",
-                                                  :marginLeft "-2px"}}
+                                               (str (-> props :extent :x) "px /" (-> props :extent :y) "px"))) }
+                  (dom/div (clj->js {:style {:position "absolute",
+                                             :top y-offset,
+                                             :left x-offset,
+                                             :marginTop "-2px",
+                                             :marginLeft "-2px"}})
                     (map render submorphs))))))))
 
 (defn create-text-node [text-props]
@@ -900,7 +1007,9 @@
                                                              [w (conj ts t)] ; the transform did not apply
                                                              (let [[new-w new-t] transformed] 
                                                                [new-w (conj ts new-t)])))
-                                                         (catch js/Error e [w (conj ts t)]))) ; new world, new transform
+                                                         (catch js/Error e (do
+                                                                             (prn e)
+                                                                             [w (conj ts t)])))) ; new world, new transform
                                                      [world []] transitions)]
              ; place the new world into the output channel
              (>! new-worlds new-world)
