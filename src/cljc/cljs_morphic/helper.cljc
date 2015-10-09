@@ -199,7 +199,8 @@
                         (add-changes structure-changes) 
                         (add-changes property-changes))
           submorphs (even-out new-submorphs)
-          new-meta-data (assoc (meta morph) :changes new-changes)] 
+          new-meta-data (assoc (meta morph) :changes new-changes
+                                            :break-abstraction? true)] 
       (with-meta (apply list self 
                    new-props 
                    submorphs) new-meta-data))))
