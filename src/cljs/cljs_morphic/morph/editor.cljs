@@ -1,10 +1,10 @@
 (ns cljs-morphic.morph.editor
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]
                    [cljs-morphic.macros :refer [morph-fn io ellipse rectangle text]])
-  (:require [cljs-morphic.morph :refer [$morph add-morph without set-prop position-in-world 
+  (:require [cljs-morphic.morph :refer [$morph add-morph add-morphs-to without set-prop position-in-world 
                                         redefine properties submorphs => idx->range&ref observe
                                         *silent* source-map description optimization
-                                        add-morphs-to]]
+                                        folding-info collapse-morph expand-abstraction]]
             [fresnel.lenses :refer [fetch putback]]
             [cljs-morphic.helper :refer [add-points]]
             [cljs-morphic.morph.window :refer [window]]
@@ -17,9 +17,13 @@
 ; EDITOR
 
 (defn set-value! [ace-instance value]
-  (let [cursor (.getCursorPositionScreen ace-instance)]
-    (.setValue ace-instance value cursor)
-    (.resize ace-instance true)))
+  (let [session (.. ace-instance -session)
+        pos (.. session -selection toJSON)
+        scroll (.. session getScrollTop)]
+    (.. session (setValue value))
+    (.. ace-instance (resize true))
+    (.. session -selection (fromJSON pos))
+    (.. session (setScrollTop scroll))))
 
 (morph-fn set-editor-value [ace-editor props submorphs value]
           (go (>! (props :input) value))
@@ -107,9 +111,6 @@
                       :font-family "Chrono Medium Italic"
                       :text-string "Loop Mapping"})))
 
-; TODO
-(defn update-zoom-cursor [world {interval :range morph-ref :ref}])
-
 (defn morph-mapping-button [editor-id position]
   (rectangle {:id (str "morph-button-of-" editor-id)
                 :inspectable? true
@@ -132,7 +133,7 @@
                       :font-family "Chrono Medium Italic"
                       :text-string "Morph Mapping"})))
 
-(defn highlight-node [world ace-instance {interval :range morph-ref :ref}]
+(defn highlight-node [world ace-instance interval morph-ref]
   (if ($morph world "highlighter")
     (do
       (.. ace-instance getSession (removeMarker (=> world "highlighter" :marker)))
@@ -153,6 +154,7 @@
                              :border-width 3,
                              :opacity 0.3,
                              :id "highlighter",
+                             :rotation (or (=> world morph-ref :rotation) 0)
                              :extent (add-points (=> world morph-ref :extent) {:x -3 :y -3}),
                              :border-color "red",
                              :marker m
@@ -165,7 +167,7 @@
       (-> world (without "highlighter")))
     world))
 
-(defn get-morph-node-at [source-map ace-instance client-pos target-ref]
+(defn get-morph-node-at [source-map ace-instance client-pos]
   (let [ace-pos (.. ace-instance -renderer (pixelToScreenCoordinates (:x client-pos) (:y client-pos)))
         idx (.. ace-instance (posToIdx ace-pos))
         {:keys [range ref]} (idx->range&ref idx source-map)]
@@ -177,7 +179,44 @@
             r ( .. ace-instance getSelectionRange)]
         (.. r (setStart start-pos))
         (.. r (setEnd end-pos))
-        {:range r :ref [target-ref ref]}))))
+        {:range r :ref ref}))))
+
+(defn handle-correspondence-mapping [world editor ace-instance client-pos]
+  (if-let [node (get-morph-node-at 
+              (=> world editor :source-map) 
+              ace-instance client-pos)]
+    (let [{:keys [range ref]} node
+          target-ref [(=> world editor :target-ref) ref]
+          folding (folding-info (=> world editor :source-map) ref)]
+      (cond-> world
+        (= :expandable folding) 
+        (=> editor :css-class "Morph zoom-in")
+        (= :collapsable folding) 
+        (=> editor :css-class "Morph zoom-out")
+        true (highlight-node ace-instance range target-ref)))
+    world))
+
+(defn zoom-in-node [world editor ace-instance cursor-pos]
+  (let [{:keys [range ref]} (get-morph-node-at 
+                             (=> world editor :source-map) 
+                             ace-instance cursor-pos)
+        world (-> world
+                (=> editor :source-map #(expand-abstraction world % ref (=> world editor :target-ref)))
+                (=> editor :css-class "Morph zoom-out"))
+        desc (with-out-str (pprint (=> world editor :source-map)))]
+    (set-value! ace-instance desc)
+    world))
+
+(defn zoom-out-node [world editor ace-instance cursor-pos]
+  (let [{:keys [range ref]} (get-morph-node-at 
+                             (=> world editor :source-map)
+                             ace-instance cursor-pos)
+        world (-> world
+                (=> editor :source-map #(collapse-morph world % ref (=> world editor :target-ref)))
+                (=> editor :css-class "Morph zoom-in"))
+        desc (with-out-str (pprint (=> world editor :source-map)))]
+    (set-value! ace-instance desc)
+    world))
 
 (defn ace-editor [value pos ext name]
   (io {:input (chan) ; this channel is to pipe information to the js-script (optional to prevent rerendering)
@@ -199,27 +238,21 @@
                              (editor (merge props new-props) submorphs))))
        :mouse-move (fn [world self cursor-pos client-pos]
                      (let [ace-instance (.edit js/ace name)
-                           node (get-morph-node-at 
-                                                (=> world self :source-map) 
-                                                ace-instance client-pos
-                                                (=> world self :target-ref))
-                           token (get-numeric-token-at ace-instance client-pos)
-                           world (if token
-                                   (=> world self :css-class "Morph scrubbing")
-                                   (=> world self :css-class "Morph"))
-                           world (if (and node (=> world self :correspondence-mapping))
-                                  (-> world 
-                                    (highlight-node ace-instance node)
-                                    (update-zoom-cursor node))
-                                  (-> world
-                                    (clear-highlighting ace-instance)))]
-                       world))
+                           token (get-numeric-token-at ace-instance client-pos)]
+                       (cond->
+                         (-> world
+                           (=> self :css-class "Morph")
+                           (clear-highlighting ace-instance))
+                         (=> world self :correspondence-mapping) (handle-correspondence-mapping 
+                                                                  self ace-instance client-pos)
+                         token (=> self :css-class "Morph scrubbing"))))
        :mouse-leave (fn [world self]
                       (-> world 
                         (clear-highlighting (.edit js/ace name))
                         (=> self :css-class "Morph")))
        :mouse-down-left (fn [world self cursor-pos client-pos]
-                          (if (= (=> world self :css-class) "Morph scrubbing")
+                          (case (=> world self :css-class)
+                            "Morph scrubbing"
                             (let [token (get-numeric-token-at (.edit js/ace name) client-pos)
                                   output (=> world self :output)]
                               (set-token-selection! (.edit js/ace name) token)
@@ -230,7 +263,9 @@
                                                                             (:extent props)
                                                                             output
                                                                             (:value token))))))
-                            world))
+                            "Morph zoom-in" (zoom-in-node world self (.edit js/ace name) client-pos)
+                            "Morph zoom-out" (zoom-out-node world self (.edit js/ace name) client-pos)
+                            "Morph" world))
        :mouse-up-left (fn [world self]
                    (-> world (without "scrubber")))
        :html (fn [props]
@@ -270,7 +305,7 @@
       (morph-mapping-button name {:x 170, :y -27})))
 
 (defn focus-editor-on [world-state editor-id inspected-morph]
-  (let [expr (fetch world-state [($morph inspected-morph) source-map])
+  (let [expr (fetch world-state [($morph inspected-morph) (source-map)])
         world-state (-> world-state
                       (=> editor-id :target inspected-morph)
                       (=> editor-id :target-ref ($morph inspected-morph))
@@ -278,15 +313,16 @@
                       (observe editor-id
                                inspected-morph
                                (fn [world editor inspected-morph _]
-                                 (let [expr (fetch world [($morph inspected-morph) 
+                                 (let [ace-instance (.edit js/ace editor-id)
+                                       sm (fetch world [($morph inspected-morph) 
                                                           (if (=> world editor :mapping-active)
                                                             optimization 
-                                                            source-map)])
-                                       desc (with-out-str (pprint expr))
-                                       world (redefine world ($morph editor) (fn [e p s]
-                                                                      (set-editor-value 
-                                                                       (e (assoc p :target-ref ($morph inspected-morph)
-                                                                                   :source-map expr) s) desc)))]
+                                                            (source-map (=> world editor-id :source-map)))])
+                                       desc (with-out-str (pprint sm))
+                                       world (-> world
+                                               (=> editor :source-map sm)
+                                               (=> editor :target-ref ($morph inspected-morph)))]
+                                   (set-value! ace-instance desc)
                                    (if (=> world editor :mapping-active)
                                      (binding [*silent* true]
                                        (putback world [($morph inspected-morph) description] desc)) 

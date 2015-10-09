@@ -12,7 +12,7 @@
     `(defn ~fn-name {:doc ~doc-string}
        ~args
          (vary-meta ~@body assoc 
-                    :description (apply list '~fn-name ~args)
+                    :sexp (apply list '~fn-name ~args)
                     :expanded-expression? true))))
 
 ; TODO: This macro still does not work, if the user defines
@@ -88,7 +88,7 @@
   `(with-meta ~expr
        {; current description, also caching the 
         ; changes applied to the expressions submorphs
-        :description ~(list 'quote expr) 
+        :sexp ~(list 'quote expr) 
         ; initial description, without any of the 
         ; changes applied to the expressions submorphs.
         ; this is usueful if the programmer wants to swtich
@@ -100,7 +100,7 @@
         ; and the vanilla morph description, in case the expression
         ; is not useful for understanding, or is marked as broken
         :compiled-props (when (morph? ~expr) (-> ~expr meta :compiled-props))
-        :morph-description (when (morph? ~expr) (-> ~expr meta :description))
+        :description (when (morph? ~expr) (-> ~expr meta :description))
         :expanded-expression? true
         :changes {}}))
 

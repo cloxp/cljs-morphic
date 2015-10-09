@@ -146,6 +146,8 @@
                            :target-props (fetch expr properties)
                            :args {:observers (-> expr meta :observers)}}))))
 
+(defn trigger-property-reactions [morph] morph)
+
 (defn redefine
   ([expression redefinition]
    (redefine expression it redefinition))
@@ -158,7 +160,7 @@
                            (morph? new-morph))
                        (do
                          (redefinition-notify expr)
-                         new-morph)
+                         (trigger-property-reactions new-morph))
                        (nil? new-morph) (do
                                           (go (>! redefinitions {:type :redefined 
                                                                  :target-props (fetch expr properties)
@@ -192,12 +194,12 @@
   (morph-eval (changes->form (-> morph meta :description) changes {})))
 
 (defmethod apply-changes :expr [expr changes]
-  (let [new-description (changes->form (-> expr meta :description) changes {:expanded-expression expr})
+  (let [new-description (changes->form (-> expr meta :sexp) changes {:expanded-expression expr})
         new-expansion (morph-eval new-description)]
     (vary-meta new-expansion merge
       {:expanded-expression? true
        :init-description (expr meta :init-description)
-       :description new-description})))
+       :sexp new-description})))
 
 ; SUBMORPH LENS
 
@@ -224,13 +226,13 @@
                                          (self props (remove nil? new-submorphs)))]
                      (-> new-expansion 
                        (vary-meta assoc 
-                                  :description 
+                                  :sexp 
                                   (changes->form 
-                                    (-> expr meta :description) 
+                                    (-> expr meta :sexp) 
                                     (fetch expr changes) 
                                     {:expanded-expression new-expansion}))
                        (vary-meta update
-                                  :morph-description
+                                  :description
                                   (fn [m]
                                     (let [self (first m)
                                           props (second m)]
@@ -314,9 +316,9 @@
               (or (idx->range&ref idx (first s) (concat ref [submorphs i]) (dec o))
                   (recur (inc i) (rest s) (+ o (get-total-expr-len (first s))))))))))))
 
-(defn expr-str-len [desc indent] 
+(defn pprinted-expr-len [expr indent] 
   (->> 
-    desc
+    (with-out-str (pprint expr))
     split-lines
     (reduce (fn [len l2]
               (let [c (count l2)]
@@ -326,46 +328,74 @@
 
 (declare description*)
 
-(defn description-for-morph* [m-expr indent] 
-  (let [md (or (-> m-expr meta :morph-description) (-> m-expr meta :description)) 
+(defn description-for-morph* [m-expr indent prev-desc] 
+  (let [md (-> m-expr meta :description) 
         self (first md)
         props (second m-expr)
-        desc (with-out-str 
-               (pprint (list self props)))
-        l    (dec (expr-str-len desc indent))]
-    (with-meta (apply list self props (map #(description* % (inc indent)) 
-                                           (fetch m-expr submorphs))) 
+        l    (dec (pprinted-expr-len (list self props) indent))
+        prev-submorphs (if (morph? prev-desc) 
+                         (concat (fetch prev-desc submorphs) (repeat nil))
+                        (repeat nil))]
+    (with-meta (apply list self props (map #(description* %1 (inc indent) %2) 
+                                           (fetch m-expr submorphs)
+                                           prev-submorphs)) 
       {:offset l
-       :abstraction-hidden? (-> m-expr meta :hide-abstraction?)
-       :abstraction? (contains? (-> m-expr meta) :morph-description)})))
+       :hide-abstraction? (-> prev-desc meta :hide-abstraction?)
+       :abstraction? (expanded-expression? m-expr)})))
 
-(defn description* [expr indent]
+(defn description* 
+  ([expr indent]
+   (description* expr indent nil))
+  ([expr indent prev-desc]
   (cond
     (expanded-expression? expr)
     (cond
-      (-> expr meta :hide-abstraction?) 
-      (description-for-morph* expr indent)
+      (-> prev-desc meta :hide-abstraction?) 
+      (description-for-morph* expr indent prev-desc)
       :default
-      (let [expr (changes->form 
-                   (-> expr meta :description) 
+      (let [desc (changes->form 
+                   (-> expr meta :sexp) 
                    (fetch expr changes)
                    {:expanded-expression expr})
-            l (expr-str-len (with-out-str (pprint expr)) indent)]
-        (with-meta expr {:offset l})))
+            l (pprinted-expr-len desc indent)]
+        (with-meta desc {:offset l
+                         :hide-abstraction? false
+                         :abstraction? true})))
     (morph? expr)
-    (description-for-morph* expr indent)))
+        (description-for-morph* expr indent prev-desc))))
 
-(deflens source-map [expr _]
-  :fetch 
-  (description* expr 0)
-  :putback
-  expr)
+(defn source-map 
+  ([] 
+   (create-lens
+    (fn [_ expr] (description* expr 0))
+       identity))
+  ([prev-sm] 
+   (create-lens
+     (fn [_ expr] (description* expr 0 prev-sm))
+        identity)))
+
+(defn folding-info [source-map ref]
+  (let [expr (fetch source-map ref)
+        sm-info (meta expr)]
+    (when (:abstraction? sm-info)
+      (if (:hide-abstraction? sm-info)
+        :collapsable
+        :expandable))))
+
+(defn expand-abstraction [world sm sm-ref target]
+  (let [m (vary-meta (fetch sm sm-ref) assoc :hide-abstraction? true)
+        sm (putback sm sm-ref m)]
+    (fetch world [target (source-map sm)])))
+
+(defn collapse-morph [world sm sm-ref target]
+  (let [m (vary-meta (fetch sm sm-ref) assoc :hide-abstraction? false)
+        sm (putback sm sm-ref m)]
+    (fetch world [target (source-map sm)])))
 
 (deflens description [expr new-description]
   :fetch 
   (let [desc (description* expr 0)]
-    (with-out-str 
-                    (pprint desc)))  
+    (with-out-str (pprint desc)))  
   :putback
   (let [new-expr (if (string? new-description) 
                    (morph-eval (read-string (str "'" new-description))) 
@@ -373,7 +403,7 @@
     (if (morph? new-expr)
       (merge-meta-data expr (morph-eval new-expr))
       (vary-meta (morph-eval new-expr) merge {:expanded-expression? true
-                                              :description new-expr
+                                              :sexp new-expr
                                               :init-description new-expr
                                               :changes {}}))))
 
@@ -384,12 +414,12 @@
     (cond
       (-> expr meta :break-abstraction?) 
       (changes->form
-                 (-> expr meta :morph-description)
+                 (-> expr meta :description)
                  (fetch expr changes)
                  {})
       :default
       (changes->form
-                 (-> expr meta :init-description)
+                 (-> expr meta :sexp)
                  (fetch expr changes)
                  {:expanded-expression expr
                   :loop-mapping true}))
@@ -468,7 +498,8 @@
 (defn cached-morph-lens [world-state id]
   (or
    (let [cached-ref (get $morph-cache id)]
-     cached-ref) 
+     (when-let [m (and cached-ref (fetch world-state cached-ref))] 
+       (when (= id (fetch m [properties :id])) cached-ref))) 
    (do
      (let [morph-ref (morph-lens world-state id [it])]
        (swap! $morph-cache assoc id morph-ref)
