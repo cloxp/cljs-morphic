@@ -1,7 +1,6 @@
 (ns cljs-morphic.morph.halo
   (:require-macros [cljs-morphic.macros :refer [rectangle image ellipse morph-fn ]])
-  (:require [cljs-morphic.morph :refer [
-                                        set-prop position-in-world $morph redefine properties]]
+  (:require [cljs-morphic.morph :refer [=> call=> set-prop position-in-world $morph redefine properties]]
             [cljs-morphic.helper :refer [add-points]]
             [fresnel.lenses :refer [fetch]]))
 
@@ -39,16 +38,22 @@
                           :draggable? true
                           :target-id target-id
                           :on-drag (fn [world id {dx :x dy :y}]
-                                     (-> world
-                                       (redefine ($morph (fetch world [($morph id) properties :target-id])) 
-                                                   (fn [self props submorphs]
-                                                     (self (assoc props :extent (add-points (:extent props) {:x (- dx) :y (- dy)})) submorphs)))
-                                        (redefine ($morph "halo") 
-                                                  (fn [halo props buttons]
-                                                    (let [new-extent (add-points (:extent props) {:x (- dx) :y (- dy)})]
-                                                      (-> (halo (assoc props :extent new-extent) buttons)
-                                                        (set-prop "infoButton" :position (add-points {:x (:x new-extent) :y 0} {:x 5 :y -15}))))))
-                                       ))}
+                                     (let [target-id (=> world id :target-id)
+                                           world (redefine world ($morph target-id) 
+                                                           (fn [self props submorphs]
+                                                             (let [new-props (assoc props :extent 
+                                                                                    (add-points (:extent props) 
+                                                                                                {:x (- dx) :y (- dy)}))]
+                                                               (cond-> (self new-props submorphs)
+                                                                 (:layout new-props) (call=> target-id :layout new-props)))))
+                                           world (redefine world ($morph "halo") 
+                                                           (fn [halo props buttons]
+                                                             (let [new-extent (=> world target-id :extent)]
+                                                               (-> (halo (assoc props :extent new-extent) buttons)
+                                                                 (set-prop "infoButton" :position 
+                                                                           (add-points {:x (:x new-extent) :y 0} {:x 5 :y -15}))
+                                                                 (set-prop "resizeButton" :position new-extent)))))]
+                                       world))}
                          (image {:id "resizeImage"
                                  :position {:x -5 :y -5} 
                                  :url "http://lively-web.org/core/media/halos/resize.svg" 

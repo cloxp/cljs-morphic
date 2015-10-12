@@ -1,7 +1,7 @@
 (ns cljs-morphic.morph.window
   (:require-macros [cljs-morphic.macros :refer [rectangle image ellipse text morph-fn]])
   (:require [cljs-morphic.morph :refer [set-prop position-in-world redefine 
-                                        $morph properties submorphs without unsubscribe =>]]
+                                        $morph properties submorphs without unsubscribe => call=>]]
             [fresnel.lenses :refer [fetch dissoc-trigger putback]]
             [cljs-morphic.helper :refer [add-points even-out]]))
 
@@ -111,7 +111,7 @@
                                                layout (=> world target :layout)]
                                            (cond-> world
                                              true (set-prop win :extent new-extent)
-                                             layout (layout {:extent (add-points {:x 0 :y -30} new-extent)}))))}))))
+                                             layout (call=> target :layout {:extent (add-points {:x 0 :y -30} new-extent)}))))}))))
 
 (morph-fn window [self props submorphs]
           (let [window-ext (add-points {:x 0 :y 30} (props :extent))

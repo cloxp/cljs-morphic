@@ -148,7 +148,8 @@
                         'io* 'cljs-morphic.helper
                         'text* 'cljs-morphic.helper
                         'polygon* 'cljs-morphic.helper
-                        'morph? 'cljs-morphic.helper}
+                        'morph? 'cljs-morphic.helper
+                        'morph-list? 'cljs-morphic.helper}
                  :require-macros {'cljs-morphic.macros 'cljs-morphic.macros}
                  :requires {'cljs-morphic.helper 'cljs-morphic.helper 
                             'cljs-morphic.playground 'cljs-morphic.playground
@@ -177,8 +178,14 @@
    (fn [c] (:value c))))
 
 (defn init-compiler [init-state cb]
-  ; (set! goog.global.COMPILED true)
-   
+  ; some testing...
+  (cljs.js/analyze-str (cljs.js/empty-state) "(fn [world new-props]
+                            (str name (:extent new-props) (:position new-props)))" nil
+                            {:eval cljs.js/js-eval}
+                            (fn [{:keys [value]}]
+                              ;(println value)
+                              ))
+  
   (set! (.-isProvided_ js/goog) (fn [name] false))
   (let [ch (chan)]
     (cljs.js/eval

@@ -16,7 +16,7 @@
             [cljs-morphic.morph.halo :refer [halo]]
             [cljs-morphic.event :refer [signals]]
             [cljs-morphic.helper 
-             :refer [eucl-distance add-points morph? find-bound-props]]
+             :refer [eucl-distance add-points morph? find-bound-props morph-list?]]
             [cljs-morphic.test :as t :refer [japanese-kitchen]]
 		      	[cljs.pprint :refer [pprint]]
             [cljs.core.async :as async :refer [>! <! chan close!]]
@@ -207,8 +207,10 @@
          :else :zero))
 
 (defmulti step (fn [lens world-state]
-                 (prn lens "and" world-state)
-                 (ast-type (fetch world-state lens))))
+                 (let [m (fetch world-state lens)]
+                   (if (morph? m) 
+                           :morph
+                           :vector))))
 
 (defmethod step :vector [morphs-ref world-state]
   (reduce (fn [world-state idx]
@@ -235,9 +237,9 @@
       (step (conj morph-ref cljs-morphic.morph/submorphs) world-state)
       world-state)))
 
-; (js/setInterval
-;   #(go (>! signals {:type :step}))
-;   1000)
+(js/setInterval
+  #(go (>! signals {:type :step}))
+  1000)
 
 (defn stepping [world-state {evt-type :type}]
   (match [evt-type]
@@ -276,7 +278,7 @@
     :extent {:y 100, :x 100},
     :position {:y -80, :x -40}})))
 
-(defn cenery [name position]
+(defmorph cenery [name position]
   (rectangle
    {:fill "blue",
     :inspectable? true,
@@ -329,7 +331,7 @@
     :stroke-width 2
     :extent {:x (* 0.85 radius) :y 3}}))
 
-(defn minute-pointer [radius minutes]
+(defmorph minute-pointer [radius minutes]
   (rectangle {:id "MinutePointer"
               :position {:x 0 :y -2}
               :fill "darkblue"
@@ -337,7 +339,7 @@
               :stroke-width 2
               :extent {:x (* .7 radius) :y 4}}))
 
-(defn hour-pointer [radius hours]
+(defmorph hour-pointer [radius hours]
   (rectangle 
    {:id "HourPointer"
     :position {:x 0 :y -2.5}
@@ -346,7 +348,7 @@
     :stroke-width 2
     :extent {:x (* .5 radius) :y 5}}))
 
-(defn hour-label [label pos size]
+(defmorph hour-label [label pos size]
   (text
    {:id (str label "h")
     :position pos
@@ -359,7 +361,7 @@
 (defn point-from-polar [radius angle]
   {:x (* radius (.cos js/Math angle)) :y (* radius (.sin js/Math angle))})
 
-(defn create-labels [radius]
+(defmorph create-labels [radius]
   (mapv #(hour-label % (point-from-polar (* radius .8) (angle-for-hour %)) (/ radius 15)) (range 1 13)))
 
 (defmorph create-clock [name bounds pos time]
