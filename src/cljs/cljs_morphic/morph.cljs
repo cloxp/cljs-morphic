@@ -209,11 +209,7 @@
   (redefine morph (fn [self props submorphs]
                     (go (>! redefinitions {:type :redefined :target-props props}))
                     (let [new-submorphs (remove nil? new-submorphs)]
-                      (vary-meta (self props new-submorphs)
-                                 update :description (fn [m]
-                                                       (let [self (first m)
-                                                             props (second m)]
-                                                         (apply list self props (map #(-> % meta :description) new-submorphs)))))))))
+                      (self props new-submorphs)))))
 
 
 (defmethod putback-submorphs :expr [expr new-submorphs]
@@ -224,19 +220,7 @@
                                          (with-meta (remove nil? new-submorphs) (meta expr))
                                          ; meta is already preserved
                                          (self props (remove nil? new-submorphs)))]
-                     (-> new-expansion 
-                       (vary-meta assoc 
-                                  :sexp 
-                                  (changes->form 
-                                    (-> expr meta :sexp) 
-                                    (fetch expr changes) 
-                                    {:expanded-expression new-expansion}))
-                       (vary-meta update
-                                  :description
-                                  (fn [m]
-                                    (let [self (first m)
-                                          props (second m)]
-                                      (apply list self props (map #(-> % meta :description) new-submorphs))))))))))
+                     new-expansion))))
 
 ; this will never happen, since (fetch [ vector ] [submorphs idx] == [idx])
 (defmethod putback-submorphs :vector [morphs new-submorphs]
@@ -292,7 +276,8 @@
 (defn get-total-expr-len 
   [source-map]
   (let [offset (-> source-map meta :offset)
-        children (when (morph? source-map) 
+        children (when 
+                   (or (morph? source-map) (morph-list? source-map)) 
                    (fetch source-map submorphs))]
     (if children
       (apply + 1 offset (map get-total-expr-len children))
@@ -302,8 +287,8 @@
   ([idx source-map]
    (idx->range&ref idx source-map [it] 0))
   ([idx source-map ref start]
-   (let [offset (+ start (dec (-> source-map meta :offset)))
-         children (when (morph? source-map) 
+   (let [offset (+ start (-> source-map meta :offset))
+         children (when (or (morph? source-map) (morph-list? source-map))  
                     (fetch source-map submorphs))]
      (when (< start idx)
       (or (loop [i 0
@@ -313,7 +298,7 @@
               (when (< idx o) 
                 {:range [start o]
                  :ref (apply vector ref)})
-              (or (idx->range&ref idx (first s) (concat ref [submorphs i]) (dec o))
+              (or (idx->range&ref idx (first s) (concat ref [submorphs i]) o)
                   (recur (inc i) (rest s) (+ o (get-total-expr-len (first s))))))))))))
 
 (defn pprinted-expr-len [expr indent] 
@@ -332,7 +317,7 @@
   (let [md (-> m-expr meta :description) 
         self (first md)
         props (second m-expr)
-        l    (dec (pprinted-expr-len (list self props) indent))
+        l    (- (pprinted-expr-len (list self props) indent) 3)
         prev-submorphs (if (morph? prev-desc) 
                          (concat (fetch prev-desc submorphs) (repeat nil))
                         (repeat nil))]
@@ -343,6 +328,18 @@
        :hide-abstraction? (-> prev-desc meta :hide-abstraction?)
        :abstraction? (expanded-expression? m-expr)})))
 
+(defn description-for-morph-list* [m-expr indent prev-desc] 
+  (let [prev-submorphs (if (morph-list? prev-desc) 
+                         (concat (fetch prev-desc submorphs) (repeat nil))
+                        (repeat nil))]
+    (with-meta (mapv #(description* %1 (inc indent) %2) 
+                     (fetch m-expr submorphs)
+                     prev-submorphs) 
+      {:offset 1
+       :morph-list? true
+       :hide-abstraction? (-> prev-desc meta :hide-abstraction?)
+       :abstraction? (expanded-expression? m-expr)})))
+
 (defn description* 
   ([expr indent]
    (description* expr indent nil))
@@ -350,8 +347,10 @@
   (cond
     (expanded-expression? expr)
     (cond
-      (-> prev-desc meta :hide-abstraction?) 
+      (and (morph? expr) (-> prev-desc meta :hide-abstraction?)) 
       (description-for-morph* expr indent prev-desc)
+      (and (morph-list? expr) (-> prev-desc meta :hide-abstraction?))
+      (description-for-morph-list* expr indent prev-desc)
       :default
       (let [desc (changes->form 
                    (-> expr meta :sexp) 
@@ -359,6 +358,7 @@
                    {:expanded-expression expr})
             l (pprinted-expr-len desc indent)]
         (with-meta desc {:offset l
+                         :morph-list? (morph-list? expr)
                          :hide-abstraction? false
                          :abstraction? true})))
     (morph? expr)
@@ -381,6 +381,13 @@
       (if (:hide-abstraction? sm-info)
         :collapsable
         :expandable))))
+
+(defn structure-info [source-map ref]
+  (let [expr (fetch source-map ref)
+        sm-info (meta expr)]
+    (if (:morph-list? sm-info)
+        :morph-list
+        :morph)))
 
 (defn expand-abstraction [world sm sm-ref target]
   (let [m (vary-meta (fetch sm sm-ref) assoc :hide-abstraction? true)
@@ -518,10 +525,15 @@
 ; WORLD OPERATIONS
 
 (defn owner [world-state id]
-  (let [lens-path ($morph world-state id)]
+  (let [lens-path (if (fetch world-state id)
+                    id 
+                    ($morph world-state id))]
     (match (take-last 2 lens-path)
            [submorphs (true :<< number?)] (fetch world-state (drop-last 2 lens-path))
            :default nil)))
+
+(defn ellipse? [morph]
+  (= 'cljs-morphic.helper/ellipse* (first morph)))
 
 (defn position-in-world 
   ([world-state ref]
@@ -532,10 +544,17 @@
   ([parent lens-path pos]
    (if (empty? lens-path)
      pos
-     (let [next-morph (fetch parent (first lens-path))]
-       (if (morph? next-morph)
-         (position-in-world next-morph (rest lens-path) (add-points pos (fetch next-morph [properties :position])))
-         (position-in-world next-morph (rest lens-path) pos))))))
+     (let [next-morph (fetch parent (first lens-path))
+           ellipse-ext (when (ellipse? parent) (fetch parent [properties :extent]))]
+       (add-points (if ellipse-ext
+                     (let [{:keys [x y]} ellipse-ext]
+                       {:x (* 0.5 x) :y (* 0.5 y)})
+                     {:x 0 :y 0})
+                   (cond
+                     (morph? next-morph)
+                     (position-in-world next-morph (rest lens-path) (add-points pos (fetch next-morph [properties :position])))
+                     :default
+                     (position-in-world next-morph (rest lens-path) pos)))))))
 
 (defn global-bounds [world-state morph-id]
   (let [[_ {extent :extent} _] (fetch world-state ($morph morph-id))]
@@ -556,7 +575,11 @@
     (let [moved-morph (fetch world-state ($morph id))
           {gpx :x gpy :y} (position-in-world world-state new-parent-id)
           global-pos (position-in-world world-state id)
-          relative-pos (add-points global-pos {:x (- gpx) :y (- gpy)})]
+          relative-pos (add-points global-pos {:x (- gpx) :y (- gpy)})
+          relative-pos (if (ellipse? (fetch world-state ($morph new-parent-id)))
+                         (let [{:keys [x y]} (=> world-state new-parent-id :extent)]
+                           (add-points relative-pos {:x (/ (- x) 2) :y (/ (- y) 2)}))
+                         relative-pos)]
       (-> world-state
         (without id)
         (add-morph new-parent-id moved-morph)
@@ -796,11 +819,16 @@
        :onMouseDown (event/extract-mouse-down-handler props)
        :onMouseUp (event/extract-mouse-up-handler props)})
 
-(defn even-out [morphs]
+(defn flatten-morphs [morphs]
+  "Transform a nested collection of morphs into
+   a flattened one. Note, that this will eradicate
+   expanded expressions, so it should only be used
+   when preparing a morph for rendering."
   (reduce (fn [morphs morph]
-            (if (vector? morph)
-              (concat morphs morph)
-              (concat morphs [morph]))) [] morphs))
+            (if (morph? morph)
+              (concat morphs [morph])
+              (concat morphs (flatten-morphs morph)))) 
+          [] morphs))
 
 (defn default-meta [morph]
   (let [[self props & submorphs] morph
@@ -826,39 +854,6 @@
 (defn scheduled-for-compile? [expr]
   (and (meta expr) (-> expr meta :abstraction-id)))
 
-; (defn rectangle [props & submorphs]
-;   (ensure-meta (apply list 'rectangle props (even-out submorphs))))
-
-; (defn ellipse [props & submorphs]
-;   (ensure-meta (apply list 'ellipse props (even-out submorphs))))
-
-; (defn image [props & submorphs]
-;   (ensure-meta (apply list 'image props (even-out submorphs))))
-
-; (defn text [props & submorphs]
-;   (ensure-meta (apply list 'text props (even-out submorphs))))
-
-; (defn polygon [props & submorphs]
-;   (ensure-meta (apply list 'polygon props (even-out submorphs))))
-
-; (defn io [props  & submorphs]
-;   "io-morphs are used to communicate with external javascript
-;   applications so that they can be incorporated into the
-;   render chain. 
-  
-;   In order to do this, the user defines an additional
-;   function that gets passed the properties and returns a 
-;   part of the dom defined in terms of oms html tag interface.
-  
-;   Additionally the user needs to define an init method,
-;   that defines, how the application is initialized from the
-;   rendered dom structure. The init method gets supplied with
-;   the props AND the dom node that was rendered from the the html
-;   node. In here, the user may perform all operations and wireing
-;   that is nessecary to get the application starting. 
-;   "
-;   (ensure-meta (apply list 'io props (even-out submorphs))))
-
 ; we should check the shema to weat out bugs
 
 (declare render-rectangle 
@@ -874,10 +869,10 @@
 (defmulti render 
   "render function, that traverses a morph tree and derives
   a tree of om-components"
-  (fn [expr ns]
+  (fn [expr]
     (cond 
-      (morph? expr) :morph
       (morph-list? expr) :vector
+      (morph? expr) :morph
       :default (throw (str "Can not render " expr)))))
 
 (defmethod render :vector [morphs]
@@ -886,14 +881,26 @@
 (defmethod render :morph [morph]
   (let [[self props & args] morph
             props (merge props (-> morph meta :compiled-props))]
+    ; (render-morph self props submorphs)
     (match [self props args]
-           ['cljs-morphic.helper/rectangle* {:id id} submorphs] (om/build render-rectangle [props submorphs] {:react-key id})
-           ['cljs-morphic.helper/ellipse* {:id id} submorphs] (om/build render-ellipse [props submorphs] {:react-key id})
-           ['cljs-morphic.helper/text* {:id id} submorphs] (om/build render-text [props submorphs] {:react-key id})
-           ['cljs-morphic.helper/image* {:id id} submorphs] (om/build render-image [props submorphs] {:react-key id})
-           ['cljs-morphic.helper/polygon* {:id id} submorphs] (om/build render-polygon [props submorphs] {:react-key id})
-           ['cljs-morphic.helper/io* {:id id} submorphs] (om/build render-io-morph [props submorphs] {:react-key id})
+           ['cljs-morphic.helper/rectangle* {:id id} submorphs] 
+           (om/build render-rectangle [props submorphs] {:react-key id})
+           ['cljs-morphic.helper/ellipse* {:id id} submorphs] 
+           (om/build render-ellipse [props submorphs] {:react-key id})
+           ['cljs-morphic.helper/text* {:id id} submorphs] 
+           (om/build render-text [props submorphs] {:react-key id})
+           ['cljs-morphic.helper/image* {:id id} submorphs] 
+           (om/build render-image [props submorphs] {:react-key id})
+           ['cljs-morphic.helper/polygon* {:id id} submorphs] 
+           (om/build render-polygon [props submorphs] {:react-key id})
+           ['cljs-morphic.helper/io* {:id id} submorphs] 
+           (om/build render-io-morph [props submorphs] {:react-key id})
            :else (prn "Can not render: " morph))))
+
+(defmulti render-morph (fn [self props submorphs] self))
+
+(defmethod render-morph 'cljs-morphic.helper/rectangle* [self props submorphs]
+  )
 
 (defn render-rectangle [[props submorphs]]
   (reify

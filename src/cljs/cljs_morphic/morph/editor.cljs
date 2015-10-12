@@ -4,7 +4,7 @@
   (:require [cljs-morphic.morph :refer [$morph add-morph add-morphs-to without set-prop position-in-world 
                                         redefine properties submorphs => idx->range&ref observe
                                         *silent* source-map description optimization
-                                        folding-info collapse-morph expand-abstraction]]
+                                        folding-info collapse-morph expand-abstraction owner structure-info]]
             [fresnel.lenses :refer [fetch putback]]
             [cljs-morphic.helper :refer [add-points]]
             [cljs-morphic.morph.window :refer [window]]
@@ -14,7 +14,54 @@
             [cljs.core.match :refer-macros [match]]
             [om.dom :as dom :include-macros true]))
 
-; EDITOR
+; MORPHS
+
+(defn loop-mapping-button [editor-id position]
+  (rectangle {:id (str "map-button-of-" editor-id)
+                :inspectable? true
+                :border-color "grey"
+                :border-width 3
+                :position position
+                :extent {:x 100 :y 20}
+                :border-radius 5
+                :mouse-click (fn [world self]
+                               (let [world (=> world editor-id :mapping-active not)
+                                     active (=> world editor-id :mapping-active)
+                                     color (if active "lightgreen" "grey")] 
+                                 (-> world
+                                   (=> self :border-color color)
+                                   (=> [self submorphs 0] :text-color color))))}
+               (text {:id "map-button-label"
+                      :position {:x 5 :y 5}
+                      :text-color "grey"
+                      :font-size 10
+                      :font-family "Chrono Medium Italic"
+                      :text-string "Loop Mapping"})))
+
+(defn morph-mapping-button [editor-id position]
+  (rectangle {:id (str "morph-button-of-" editor-id)
+                :inspectable? true
+                :border-color "grey"
+                :border-width 3
+                :position position
+                :extent {:x 100 :y 20}
+                :border-radius 5
+                :mouse-click (fn [world self]
+                               (let [world (=> world editor-id :correspondence-mapping not)
+                                     active (=> world editor-id :correspondence-mapping)
+                                     color (if active "orange" "grey")]
+                                 (-> world
+                                   (=> self :border-color color)
+                                   (=> [self submorphs 0] :text-color color))))}
+               (text {:id "morph-button-label"
+                      :position {:x 5 :y 5}
+                      :text-color "grey"
+                      :font-size 10
+                      :font-family "Chrono Medium Italic"
+                      :text-string "Morph Mapping"})))
+
+
+; ACE
 
 (defn set-value! [ace-instance value]
   (let [session (.. ace-instance -session)
@@ -72,6 +119,22 @@
                        (js->clj ace-pos3 :keywordize-keys true))]]
     (some #(when (= (get % :type) "constant.numeric") %) tokens)))
 
+(defn get-morph-node-at [source-map ace-instance client-pos]
+  (let [ace-pos (.. ace-instance -renderer (pixelToScreenCoordinates (:x client-pos) (:y client-pos)))
+        idx (.. ace-instance (posToIdx ace-pos))
+        {:keys [range ref]} (idx->range&ref idx source-map)]
+    (when range 
+      (let [[start end] range
+            idx->pos #(.. ace-instance getSession -doc (indexToPosition %))
+            start-pos (idx->pos start)
+            end-pos (idx->pos end)
+            r ( .. ace-instance getSelectionRange)]
+        (.. r (setStart start-pos))
+        (.. r (setEnd end-pos))
+        {:range r :ref ref}))))
+
+; SYMBOLIC -> SPACIAL MAPPING
+
 (defn scrubber-pane [ace-instance token-pos extent output scrub-value]
   (rectangle {:id "scrubber-pane" :fill "blue" :opacity 0 :extent extent
               :mouse-up-left (fn [world self]
@@ -89,62 +152,37 @@
                               (save-handler ace-instance output)
                               world))}))
 
-(defn loop-mapping-button [editor-id position]
-  (rectangle {:id (str "map-button-of-" editor-id)
-                :inspectable? true
-                :border-color "grey"
-                :border-width 3
-                :position position
-                :extent {:x 100 :y 20}
-                :border-radius 5
-                :mouse-click (fn [world self]
-                               (let [world (=> world editor-id :mapping-active not)
-                                     active (=> world editor-id :mapping-active)
-                                     color (if active "lightgreen" "grey")] 
-                                 (-> world
-                                   (=> self :border-color color)
-                                   (=> [self submorphs 0] :text-color color))))}
-               (text {:id "map-button-label"
-                      :position {:x 5 :y 5}
-                      :text-color "grey"
-                      :font-size 10
-                      :font-family "Chrono Medium Italic"
-                      :text-string "Loop Mapping"})))
-
-(defn morph-mapping-button [editor-id position]
-  (rectangle {:id (str "morph-button-of-" editor-id)
-                :inspectable? true
-                :border-color "grey"
-                :border-width 3
-                :position position
-                :extent {:x 100 :y 20}
-                :border-radius 5
-                :mouse-click (fn [world self]
-                               (let [world (=> world editor-id :correspondence-mapping not)
-                                     active (=> world editor-id :correspondence-mapping)
-                                     color (if active "orange" "grey")]
-                                 (-> world
-                                   (=> self :border-color color)
-                                   (=> [self submorphs 0] :text-color color))))}
-               (text {:id "morph-button-label"
-                      :position {:x 5 :y 5}
-                      :text-color "grey"
-                      :font-size 10
-                      :font-family "Chrono Medium Italic"
-                      :text-string "Morph Mapping"})))
+(defn highlight-node-list [world ace-instance interval coll-ref]
+  "Highlight a group of morphs (usually due to a loop or other repeater definition) 
+   in the world an its corresponding code snipped within the editor."
+  (let [owner-ref (apply vector (drop-last 2 (flatten coll-ref))) 
+          m (.. ace-instance 
+                getSession 
+                (addMarker interval 
+                           "ace-code-highlight" "text"))
+        refs (map (fn [l idx] [l idx]) (repeat coll-ref) (range (count (fetch world coll-ref))))
+        {owner-x :x owner-y :y} (position-in-world world owner-ref)]
+      (-> world 
+        (add-morph "world" (rectangle
+                            {:id "coll-highlighter"
+                             :position {:x owner-x :y owner-y}
+                             :extent (add-points (=> world owner-ref :extent) {:x -3 :y -3})
+                             :marker m}
+                            (map #(rectangle
+                                   {:fill "purple",
+                                    :border-width 3,
+                                    :opacity 0.3,
+                                    :id (str %),
+                                    :rotation (or (=> world % :rotation) 0)
+                                    :extent (add-points (=> world % :extent) {:x -3 :y -3}),
+                                    :border-color "red",
+                                    :position (add-points {:x (- (+ 3 owner-x)) :y (- (+ 3 owner-y) )} (position-in-world world %))})
+                                 refs))))))
 
 (defn highlight-node [world ace-instance interval morph-ref]
-  (if ($morph world "highlighter")
-    (do
-      (.. ace-instance getSession (removeMarker (=> world "highlighter" :marker)))
-      (-> world 
-        (=> "highlighter" :position (position-in-world world morph-ref))
-        (=> "highlighter" :extent (add-points (=> world morph-ref :extent) {:x -3 :y -3}))
-        (=> "highlighter" :marker (.. ace-instance 
-                                      getSession 
-                                      (addMarker interval 
-                                                 "ace-code-highlight" "text"))))) 
-    (let [m (.. ace-instance 
+  "Highlight the morph in the world an its corresponding code snipped
+   within the editor."
+  (let [m (.. ace-instance 
                 getSession 
                 (addMarker interval 
                            "ace-code-highlight" "text"))] 
@@ -158,42 +196,37 @@
                              :extent (add-points (=> world morph-ref :extent) {:x -3 :y -3}),
                              :border-color "red",
                              :marker m
-                             :position (position-in-world world morph-ref)}))))))
+                             :position (add-points {:x -3 :y -3} ; border offset...
+                                                   (position-in-world world morph-ref))})))))
 
 (defn clear-highlighting [world ace-instance]
-  (if ($morph world "highlighter")
+  (if 
+    ($morph world "highlighter")
     (do
       (.. ace-instance getSession (removeMarker (=> world "highlighter" :marker)))
       (-> world (without "highlighter")))
-    world))
-
-(defn get-morph-node-at [source-map ace-instance client-pos]
-  (let [ace-pos (.. ace-instance -renderer (pixelToScreenCoordinates (:x client-pos) (:y client-pos)))
-        idx (.. ace-instance (posToIdx ace-pos))
-        {:keys [range ref]} (idx->range&ref idx source-map)]
-    (when range 
-      (let [[start end] range
-            idx->pos #(.. ace-instance getSession -doc (indexToPosition %))
-            start-pos (idx->pos start)
-            end-pos (idx->pos end)
-            r ( .. ace-instance getSelectionRange)]
-        (.. r (setStart start-pos))
-        (.. r (setEnd end-pos))
-        {:range r :ref ref}))))
+    (if ($morph world "coll-highlighter")
+      (do
+        (.. ace-instance getSession (removeMarker (=> world "coll-highlighter" :marker)))
+        (-> world (without "coll-highlighter")))
+      world)))
 
 (defn handle-correspondence-mapping [world editor ace-instance client-pos]
-  (if-let [node (get-morph-node-at 
-              (=> world editor :source-map) 
-              ace-instance client-pos)]
-    (let [{:keys [range ref]} node
+  (if-let [node (get-morph-node-at (=> world editor :source-map) ace-instance client-pos)]
+    (let [sm (=> world editor :source-map)
+          {:keys [range ref]} node
           target-ref [(=> world editor :target-ref) ref]
-          folding (folding-info (=> world editor :source-map) ref)]
+          folding (folding-info sm ref)
+          structure (structure-info sm ref)]
       (cond-> world
         (= :expandable folding) 
         (=> editor :css-class "Morph zoom-in")
         (= :collapsable folding) 
         (=> editor :css-class "Morph zoom-out")
-        true (highlight-node ace-instance range target-ref)))
+        (= :morph-list structure)
+        (highlight-node-list ace-instance range target-ref)
+        (= :morph structure)
+        (highlight-node ace-instance range target-ref)))
     world))
 
 (defn zoom-in-node [world editor ace-instance cursor-pos]
@@ -217,6 +250,8 @@
         desc (with-out-str (pprint (=> world editor :source-map)))]
     (set-value! ace-instance desc)
     world))
+
+; EDITOR MORPH
 
 (defn ace-editor [value pos ext name]
   (io {:input (chan) ; this channel is to pipe information to the js-script (optional to prevent rerendering)

@@ -1,6 +1,6 @@
 (ns cljs-morphic.macros
   (:require
-   [cljs-morphic.helper :refer [morph? applicative tree-zipper find-bound-props]] 
+   [cljs-morphic.helper :refer [morph? morph-list? applicative tree-zipper find-bound-props]] 
    [clojure.zip]))
 
 
@@ -78,8 +78,9 @@
         tfmed (take-while (comp not nil? :z) it)
         instrumented-fn (-> tfmed last :z clojure.zip/node)]
     `(with-meta ~(apply list 'map instrumented-fn rest-expr)
-      {:description ~(list 'quote map-expr)
-       :init-description ~(list 'quote map-expr)
+       {:description ~(mapv #(-> % meta :description) map-expr)
+        :sexp ~(list 'quote map-expr)
+        :init-description ~(list 'quote map-expr)
         :expanded-expression? true
         :changes {}})))
 
@@ -100,7 +101,11 @@
         ; and the vanilla morph description, in case the expression
         ; is not useful for understanding, or is marked as broken
         :compiled-props (when (morph? ~expr) (-> ~expr meta :compiled-props))
-        :description (when (morph? ~expr) (-> ~expr meta :description))
+        :description (cond 
+                       (morph? ~expr) 
+                       (-> ~expr meta :description)
+                       (morph-list? ~expr)
+                       ~(mapv #(-> % meta :description) expr))
         :expanded-expression? true
         :changes {}}))
 
